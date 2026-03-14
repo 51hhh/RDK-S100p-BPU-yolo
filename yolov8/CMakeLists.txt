@@ -45,13 +45,13 @@ target_link_libraries(yolov8_usb_camera ${LINK_libs})
 
 # ==================== 目标2: example (可选，用于兼容原有示例) ====================
 # 如果 example 目录存在则编译
-if(EXISTS "${CMAKE_SOURCE_DIR}/example/main.cc")
+if(EXISTS "${CMAKE_SOURCE_DIR}/../example/main.cc")
     add_executable(ultralytics_yolo11_example
-        example/main.cc
-        example/ultralytics_yolo11.cc
+        ${CMAKE_SOURCE_DIR}/../example/main.cc
+        ${CMAKE_SOURCE_DIR}/../example/ultralytics_yolo11.cc
         ${UTILS_SRC}
     )
-    target_include_directories(ultralytics_yolo11_example PRIVATE example/)
+    target_include_directories(ultralytics_yolo11_example PRIVATE ${CMAKE_SOURCE_DIR}/../example/)
     target_link_libraries(ultralytics_yolo11_example ${LINK_libs})
 endif()
 

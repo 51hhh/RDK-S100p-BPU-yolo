@@ -131,8 +131,7 @@ make -j4
 
 编译产物：
 - `yolov8_usb_camera` — USB 摄像头实时检测主程序
-
-> 注：`example/` 目录中包含 YOLOv11 示例代码，但因 CMakeLists.txt 的路径检测逻辑限制，当前不会自动编译。如需编译，可将 `example/` 目录复制到 `yolov8/` 下或手动修改 CMakeLists.txt 中的路径。
+- `ultralytics_yolo11_example` — YOLOv11 示例程序（`example/` 目录存在时自动编译）
 
 ### 3. 运行
 

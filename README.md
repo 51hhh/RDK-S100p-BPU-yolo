@@ -1,5 +1,9 @@
 # RDK S100p BPU YOLO 推理框架
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
+[![Language](https://img.shields.io/badge/Language-C%2B%2B17-brightgreen.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-RDK%20S100p-orange.svg)]()
+
 在 **D-Robotics 地瓜派 RDK S100p** 开发板上，利用 **BPU（神经网络处理单元）** 硬件加速，实现 YOLOv8 / YOLOv11 系列目标检测模型的高性能实时推理。
 
 ## 特性
@@ -104,6 +108,7 @@ RDK-S100p-BPU-yolo/
 | CMake | >= 3.0 |
 | OpenMP | 并行计算支持 |
 | gflags | 命令行参数解析 |
+| fmt | 格式化输出库 |
 | GCC | >= 7.0（C++17 支持） |
 
 ## 快速开始
@@ -126,7 +131,8 @@ make -j4
 
 编译产物：
 - `yolov8_usb_camera` — USB 摄像头实时检测主程序
-- `ultralytics_yolo11_example` — YOLOv11 示例程序（可选）
+
+> 注：`example/` 目录中包含 YOLOv11 示例代码，但因 CMakeLists.txt 的路径检测逻辑限制，当前不会自动编译。如需编译，可将 `example/` 目录复制到 `yolov8/` 下或手动修改 CMakeLists.txt 中的路径。
 
 ### 3. 运行
 
@@ -216,7 +222,7 @@ YOLOv8/v11 使用 DFL（Distribution Focal Loss）进行边界框回归，将每
 [取流]   USB摄像头取流:              xx.xx ms
 [预处理] Letterbox+NV12转换+内存拷贝: xx.xx ms
 [推理]   BPU推理:                    xx.xx ms
-[后处理] DFL解码+NMS+坐标映射:        xx.xx ms
+[后处理] DFL解码+NMS+内存拷贝:        xx.xx ms
 [绘制]   目标框绘制:                  xx.xx ms
 [流水线] 预处理+推理+后处理:          xx.xx ms (XX.X FPS)
 [端到端] 取流到处理完成延迟:          xx.xx ms

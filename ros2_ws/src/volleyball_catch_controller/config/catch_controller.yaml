@@ -46,6 +46,7 @@ catch_controller:
     transport_diagnostics_rate_hz: 5.0
     odom_history_s: 3.0
     odom_timeout_s: 0.10
+    odom_max_message_age_s: 0.05
     max_odom_gap_s: 0.05
     max_odom_extrapolation_s: 0.02
     ground_z_m: 0.0

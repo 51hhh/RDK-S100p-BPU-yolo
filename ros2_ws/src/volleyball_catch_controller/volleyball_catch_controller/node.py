@@ -24,6 +24,7 @@ from volleyball_interfaces.msg import (
 
 from .stream_safety import StreamOrderGuard, d435_timing_valid
 from .time_sync import SyncSample, TimeSyncGuard
+from .odom_safety import OdomContractGuard
 
 from .tracking import (
     BallisticTracker,
@@ -39,17 +40,6 @@ IDLE, FAR_NX, WAIT_D435, NEAR_D435 = 0, 1, 2, 3
 
 def stamp_s(stamp):
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-
-def yaw_of(quaternion):
-    values = np.array(
-        [quaternion.x, quaternion.y, quaternion.z, quaternion.w], dtype=float
-    )
-    norm = np.linalg.norm(values)
-    if not np.isfinite(norm) or norm < 1e-9:
-        return None
-    x, y, z, w = values / norm
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def quaternion_matrix(values):
@@ -126,6 +116,7 @@ class CatchController(Node):
             'transport_diagnostics_rate_hz': 5.0,
             'odom_history_s': 3.0,
             'odom_timeout_s': 0.10,
+            'odom_max_message_age_s': 0.05,
             'max_odom_gap_s': 0.05,
             'max_odom_extrapolation_s': 0.02,
             'ground_z_m': 0.0,
@@ -316,6 +307,12 @@ class CatchController(Node):
             max_gap_s=self.p['max_odom_gap_s'],
             max_extrapolation_s=self.p['max_odom_extrapolation_s'],
         )
+        self.odom_guard = OdomContractGuard(
+            world_frame=self.p['world_frame'],
+            base_frame=self.p['base_frame'],
+            max_message_age_s=self.p['odom_max_message_age_s'],
+            max_future_skew_s=self.p['max_future_skew_s'],
+        )
         self.last_odom_receive = 0.0
         self.state = IDLE
         self.source_epoch = 0
@@ -489,24 +486,29 @@ class CatchController(Node):
 
     def on_odom(self, message):
         timestamp = stamp_s(message.header.stamp)
+        receive_time = self.now_s()
         with self.pending_lock:
             self._record_receive('odom')
-        if (
-            timestamp <= 0.0
-            or message.header.frame_id != self.p['world_frame']
-            or message.child_frame_id != self.p['base_frame']
-            or not self.message_fresh(timestamp, self.p['odom_history_s'])
-        ):
-            return
         position = message.pose.pose.position
         orientation = message.pose.pose.orientation
         quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]
-        if yaw_of(orientation) is None or not finite_vector([position.x, position.y, position.z], 3):
+        decision = self.odom_guard.accept(
+            timestamp,
+            receive_time,
+            message.header.frame_id,
+            message.child_frame_id,
+            [position.x, position.y, position.z],
+            quaternion,
+        )
+        if not decision.accepted:
+            self._record_reject('odom', decision.reason)
             return
         if self.odom.add(
             timestamp, [position.x, position.y, position.z], quaternion
         ):
-            self.last_odom_receive = self.now_s()
+            self.last_odom_receive = receive_time
+        else:
+            self._record_reject('odom', 'odom history rejected sample')
 
     def odom_at(self, timestamp):
         return self.odom.pose_at(timestamp)
@@ -1098,6 +1100,7 @@ class CatchController(Node):
                 sync_sample.source_epoch, now
             )
         odom_online = ages['odom'] <= self.p['odom_timeout_s']
+        odom_valid = self.odom_guard.valid_at(now, self.p['odom_timeout_s'])
         message = TransportDiagnostics()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = self.p['world_frame']
@@ -1106,10 +1109,12 @@ class CatchController(Node):
         message.time_sync_online = time_sync_online
         message.time_sync_valid = time_sync_valid
         message.odom_online = odom_online
+        message.odom_valid = odom_valid
         message.nx_receive_age_s = float(ages['nx'])
         message.d435_receive_age_s = float(ages['d435'])
         message.time_sync_receive_age_s = float(ages['time_sync'])
         message.odom_receive_age_s = float(ages['odom'])
+        message.odom_rate_hz = float(self.odom_guard.rate_hz)
         for source in ('nx', 'd435', 'time_sync', 'odom'):
             metrics = self.transport[source]
             setattr(message, f'{source}_messages', metrics['messages'])
@@ -1117,6 +1122,7 @@ class CatchController(Node):
         message.nx_rejected = self.transport['nx']['rejected']
         message.d435_rejected = self.transport['d435']['rejected']
         message.time_sync_rejected = self.transport['time_sync']['rejected']
+        message.odom_rejected = self.transport['odom']['rejected']
         message.nx_epoch_changes = self.transport['nx']['epoch_changes']
         message.d435_epoch_changes = self.transport['d435']['epoch_changes']
         offline = [
@@ -1129,6 +1135,8 @@ class CatchController(Node):
             )
             if not online
         ]
+        if odom_online and not odom_valid:
+            offline.append('odom-invalid')
         message.detail = 'all monitored links online' if not offline else (
             'offline/stale: ' + ','.join(offline)
         )

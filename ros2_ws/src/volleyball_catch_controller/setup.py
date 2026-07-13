@@ -20,6 +20,7 @@ setup(
         'catch_controller = volleyball_catch_controller.node:main',
         'nx_time_sync_publisher = volleyball_catch_controller.nx_time_sync_node:main',
         'prepare_nx_epoch = volleyball_catch_controller.nx_epoch:main',
+        'check_chassis_odom = volleyball_catch_controller.chassis_odom_check_node:main',
         'transport_recovery_test = volleyball_catch_controller.transport_recovery_test_node:main',
     ]},
 )

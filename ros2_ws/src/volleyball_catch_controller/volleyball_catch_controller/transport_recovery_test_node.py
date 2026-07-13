@@ -152,6 +152,9 @@ class RecoverySimulator(Node):
             'NX did not recover': bool(message and message.nx_online),
             'time sync did not recover': bool(message and message.time_sync_online),
             'time sync did not relock': bool(message and message.time_sync_valid),
+            'synthetic chassis odometry invalid': bool(
+                message and message.odom_valid and message.odom_rate_hz >= 20.0
+            ),
             'NX deadline miss not counted': bool(message and message.nx_deadline_misses),
             'sync deadline miss not counted': bool(
                 message and message.time_sync_deadline_misses

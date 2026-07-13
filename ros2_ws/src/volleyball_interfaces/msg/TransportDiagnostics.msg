@@ -4,10 +4,12 @@ bool d435_online
 bool time_sync_online
 bool time_sync_valid
 bool odom_online
+bool odom_valid
 float32 nx_receive_age_s
 float32 d435_receive_age_s
 float32 time_sync_receive_age_s
 float32 odom_receive_age_s
+float32 odom_rate_hz
 uint64 nx_messages
 uint64 d435_messages
 uint64 time_sync_messages
@@ -19,6 +21,7 @@ uint64 odom_deadline_misses
 uint64 nx_rejected
 uint64 d435_rejected
 uint64 time_sync_rejected
+uint64 odom_rejected
 uint64 nx_epoch_changes
 uint64 d435_epoch_changes
 string detail

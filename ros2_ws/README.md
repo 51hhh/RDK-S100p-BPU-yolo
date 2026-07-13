@@ -38,8 +38,22 @@ cd ~/RDK-S100p-BPU-yolo/yolov8/build
 
 4. 启动 NX 远场节点，发布原始双目观测 `/nx/ball/observation`。
 
-NX 同时必须发布 `/diagnostics/time_sync` (`TimeSyncStatus`)。默认配置要求时钟状态新鲜、
-偏差不超过 20 ms、估计不确定度不超过 2 ms，否则远场观测不会进入控制。
+NX侧先准备Chrony和共享`source_epoch`，再启动同步发布器：
+
+```bash
+source ros2_ws/scripts/use_nx_transport.sh
+sudo install -d -o "$USER" -g "$(id -gn)" /run/volleyball
+# 每次联合启动生成新epoch；NX观测进程必须读取同一文件或环境变量。
+export NX_SOURCE_EPOCH=$(ros2 run volleyball_catch_controller prepare_nx_epoch)
+ros2 launch volleyball_catch_controller nx_time_sync.launch.py
+```
+
+同步发布器读取`chronyc -c tracking`，发布测量时刻、序号、offset、uncertainty、servo状态
+和同步源。默认要求测量与接收状态均新鲜、servo锁定、偏差不超过20 ms、估计不确定度
+不超过2 ms，否则远场观测不会进入控制；偏差5–20 ms时降低NX观测权重。
+
+D435观测同时发布RGB与Depth采集时间差、librealsense时间域和映射不确定度。默认只允许
+GLOBAL_TIME/SYSTEM_TIME更新近场滤波；RGB/Depth差超过2 ms或映射无效时不能接管。
 
 实车启用前必须填写
 `volleyball_catch_controller/config/catch_controller.yaml` 中两个相机外参，并分别将
@@ -69,6 +83,15 @@ ros2 topic echo /auto/goal_valid
 
 三个滤波诊断话题使用 Best Effort，并由 `diagnostics_rate_hz` 限频；它们不参与底盘控制。
 
-注意：Student-t EKF、阻力物理、RK4 和控制门控已与 NX 对齐；要让真实数据流逐帧复现
-NX 本机旧轨迹结果，NX 传输消息还需携带旧轨迹模块实际选中的观测及其最终测量噪声，
-不能只依赖当前 raw position 的保守传输协方差。
+## 通信与断网恢复诊断
+
+```bash
+ros2 topic echo /diagnostics/transport
+ros2 run volleyball_catch_controller transport_recovery_test
+```
+
+第二条命令会自动验证DDS deadline、断连、旧NX/同步消息重放以及新epoch恢复。双板部署前
+还应分别运行`ros2_ws/scripts/check_transport.sh nx eth0`和`... rdk eth0`。
+
+NX 发送的是 `HybridDepthEstimator` 生成的当前帧混合深度原始观测；RDK 不复用 NX 的
+9D 深度滤波状态，而是在 `odom` 下独立运行接球所需的 Student-t 弹道滤波。

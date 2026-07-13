@@ -50,6 +50,10 @@ int64 stereo_timestamp_delta_ns
 std_msgs/Header header
 uint32 source_epoch
 uint32 frame_id
+int64 rgb_depth_timestamp_delta_ns
+uint64 timestamp_uncertainty_ns
+uint8 timestamp_domain
+bool timestamp_mapping_valid
 int32 class_id
 float32 detection_confidence
 float32[4] bbox_xyxy
@@ -63,6 +67,11 @@ float32 mono_center_z_m
 bool detection_valid
 bool rgbd_valid
 bool mono_valid
+
+uint8 TIMESTAMP_UNKNOWN=0
+uint8 TIMESTAMP_HARDWARE_CLOCK=1
+uint8 TIMESTAMP_SYSTEM_TIME=2
+uint8 TIMESTAMP_GLOBAL_TIME=3
 ```
 
 约定：
@@ -70,6 +79,9 @@ bool mono_valid
 - `header.frame_id=camera_color_optical_frame`。
 - `source_epoch` 在 D435 视觉进程启动时随机生成，用于识别进程重启和帧号回绕。
 - `position` 是对齐到彩色坐标的球心 RGB-D 三维坐标。
+- `header.stamp`使用彩色帧采集时刻，`rgb_depth_timestamp_delta_ns=depth-color`。
+- 实车默认只接受`timestamp_mapping_valid=true`且RGB/Depth时间差不超过2 ms的观测。
+- `TIMESTAMP_HARDWARE_CLOCK`表示使用设备时钟软件映射；默认仅用于诊断，不能接管。
 - `detection_valid` 可触发远近场切换；`rgbd_valid` 才能作为高质量近场测量。
 - 没有有效 RGB-D 时，`position` 填 NaN，不允许用零表示无效。
 - 协方差按行排列；无可靠估计时用配置的保守方差，不能全部填零。
@@ -99,14 +111,31 @@ uint8 FAILED=3
 ```text
 std_msgs/Header header
 uint32 source_epoch
+uint64 sequence
 int64 offset_ns
 uint64 uncertainty_ns
 bool synchronized
+uint8 servo_state
+string clock_source
+
+uint8 SERVO_UNKNOWN=0
+uint8 SERVO_UNLOCKED=1
+uint8 SERVO_LOCKED=2
+uint8 SERVO_HOLDOVER=3
 ```
 
-`offset_ns = NX时钟 - RDK时钟`。RDK 将 NX 图像时间减去该偏差后再查询历史 odom。
-状态必须与当前 NX `source_epoch` 一致并持续刷新；偏差超过 5 ms 报警，超过 20 ms
-或不确定度超过配置阈值时拒绝远场观测。
+`header.stamp`是NX侧同步偏差的实际测量时刻；`offset_ns = NX时钟 - RDK时钟`。
+RDK将NX图像时间减去该偏差后再查询历史odom。RDK同时检查测量年龄、接收年龄、
+`source_epoch`、单调`sequence`和servo锁定状态；已退役epoch和旧序号不能在重连后重新生效。
+偏差超过5 ms时逐步降低NX观测权重，超过20 ms或不确定度超过配置阈值时拒绝远场观测。
+
+## TransportDiagnostics.msg
+
+话题：`/diagnostics/transport`
+
+发布5 Hz通信状态，包括NX、D435、时间同步及odom的在线/超时状态、最后接收年龄、
+接收消息数、DDS deadline miss计数、应用层拒绝数和相机`source_epoch`切换计数。
+该话题使用Best Effort，只用于诊断，不参与控制判定。
 
 ## CatchState.msg
 
@@ -162,7 +191,8 @@ uint8 RESET_BALL_LOST=3
 |---|---|---:|---|---:|
 | `/nx/ball/observation` | Best effort | Keep last 1 | Volatile | 50 ms |
 | `/d435/ball/observation` | Best effort | Keep last 1 | Volatile | 40 ms |
-| `/diagnostics/time_sync` | Reliable | Keep last 10 | Volatile | 500 ms |
+| `/diagnostics/time_sync` | Reliable | Keep last 1 | Volatile | 500 ms |
+| `/diagnostics/transport` | Best effort | Keep last 1 | Volatile | 无 |
 | `/odom` | Best effort | Keep last 20 | Volatile | 20 ms |
 | `/catch/event` | Reliable | Keep last 10 | Volatile | 无 |
 | `/auto/goal_pose` | Reliable | Keep last 1 | Volatile | 100 ms |

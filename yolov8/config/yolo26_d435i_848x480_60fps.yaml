@@ -17,7 +17,7 @@ camera:
 
   # Fixed imaging parameters for repeatable RGB-D and detector tests.
   auto_exposure: false
-  exposure_us: 15000
+  exposure_us: 5000
   gain: 128                     # D435i color sensor maximum
   dynamic_framerate: false
   power_line_frequency: 1       # 0=off, 1=50Hz, 2=60Hz, 3=auto
@@ -34,7 +34,7 @@ depth:
   object_diameter_m: 0.215       # Volleyball physical diameter
   bbox_scale: 0.95              # Detector bbox/projected diameter calibration
   min_m: 0.20
-  max_m: 12.0
+  max_m: 6.0
 
   # Center plus three concentric rings on the visible ball surface. Each
   # location uses a local 3x3 median; center candidates are fused by MAD.
@@ -63,11 +63,11 @@ depth:
 detector:
   model_path: "../model/yolo26n_nashm_640x640_nv12.hbm"
   label_file: "../model/yolo26_classes.names"
-  score_threshold: 0.05
+  score_threshold: 0.25
   nms_threshold: 0.45
 
 display:
-  enabled: true
+  enabled: false
   fullscreen: false
   width: 1280
   height: 720
@@ -89,7 +89,7 @@ tracking:
   max_rgbd_mono_delta_m: 0.80
 
 trajectory:
-  enabled: true
+  enabled: false                 # RDK catch_controller owns trajectory prediction
   student_t_nu: 12.0
   q_position: 0.0001
   q_velocity: 1.5
@@ -120,7 +120,7 @@ landing_publish:
   max_landing_sigma_m: 0.30
   max_abs_x_m: 3.6
   min_depth_m: 0.0
-  max_depth_m: 12.0
+  max_depth_m: 6.0
   allow_fallback_observation: false
 
 d435_observation:

@@ -12,6 +12,9 @@
 - 支持 **YOLOv8** 与 **YOLOv11** 系列模型，包含多种自定义注意力机制变体
 - 完整的推理 Pipeline：Letterbox 前处理 → BPU 推理 → DFL 解码 + NMS 后处理
 - USB 摄像头实时目标检测，支持自动探测摄像头设备
+- Intel RealSense D435i 彩色/深度同步取流，深度对齐到彩色检测框
+- 球面多环深度采样、局部中值与 Median/MAD 离群点剔除
+- 基于相机畸变参数和已知球直径的单目 BBox 测距
 - NV12 色彩空间硬件友好输入格式，INT8 量化模型推理
 - 内置详细性能计时统计（取流 / 前处理 / 推理 / 后处理 / 绘制）
 - 包含 HBM 模型诊断工具 `test_hbm`，辅助调试和验证
@@ -105,6 +108,7 @@ RDK-S100p-BPU-yolo/
 |------|------|
 | RDK UCP SDK | `libdnn.so`、`libhbucp.so`（`/usr/hobot/lib`） |
 | OpenCV | >= 4.0 |
+| librealsense2 | D435i RGB-D同步、深度对齐和相机内参读取 |
 | CMake | >= 3.0 |
 | OpenMP | 并行计算支持 |
 | gflags | 命令行参数解析 |
@@ -112,6 +116,14 @@ RDK-S100p-BPU-yolo/
 | GCC | >= 7.0（C++17 支持） |
 
 ## 快速开始
+
+RDK S100P + D435i + YOLO26 的完整 RGB-D 启动、配置、可视化和深度图说明见：
+
+- [RGB-D 使用说明](docs/RGBD_USAGE.md)
+- [远近场接球系统 Wiki](wiki/Home.md)
+
+RDK ROS2 接口包和独立控制节点位于 `ros2_ws/src/`。视觉节点只发布
+`/d435/ball/observation`，控制节点是 `/auto/goal_pose` 的唯一发布者。
 
 ### 1. 克隆仓库
 
@@ -139,6 +151,7 @@ make -j4
 
 ```bash
 ./yolov8_usb_camera \
+    --config=../config/yolo26_d435i_848x480_60fps.yaml \
     --model_path=../model/best.hbm \
     --label_file=../model/classes.names
 ```
@@ -154,7 +167,23 @@ make -j4
     --nms_thres=0.45 \
     --camera_width=1920 \
     --camera_height=1080 \
-    --camera_fps=30
+    --camera_fps=30 \
+    --display=true \
+    --fullscreen=false \
+    --display_width=1280 \
+    --display_height=720
+```
+
+**保存实时可视化结果（无显示器/远程调试时使用）：**
+
+```bash
+./yolov8_usb_camera \
+    --model_path=../model/best.hbm \
+    --label_file=../model/classes.names \
+    --display=false \
+    --save_video=./runs/vis.avi \
+    --snapshot_dir=./runs/snapshots \
+    --snapshot_interval=30
 ```
 
 ### 4. 模型诊断工具（可选）
@@ -178,7 +207,13 @@ cmake .. && make
 | `--camera_width` | `1920` | 摄像头采集宽度 |
 | `--camera_height` | `1080` | 摄像头采集高度 |
 | `--camera_fps` | `30` | 摄像头采集帧率 |
+| `--display` | `true` | 是否显示实时检测窗口 |
 | `--fullscreen` | `true` | 全屏显示 |
+| `--display_width` | `1280` | 非全屏窗口最大宽度 |
+| `--display_height` | `720` | 非全屏窗口最大高度 |
+| `--save_video` | 空 | 保存带检测框的视频路径 |
+| `--snapshot_dir` | 空 | 定时保存可视化帧的目录 |
+| `--snapshot_interval` | `0` | 每隔多少帧保存一张可视化帧，0 表示不保存 |
 
 ## 预训练模型
 

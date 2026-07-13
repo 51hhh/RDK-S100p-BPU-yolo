@@ -1,0 +1,123 @@
+# ============================================================
+# RDK S100P + Intel RealSense D435i + YOLO26
+# Highest common RGB/Depth profile at 60 FPS: 848x480.
+#
+# RGB-D mode uses librealsense and aligns the Z16 depth frame to RGB with
+# rs2::align. Color intrinsics/distortion are read from the device profile.
+# Explicit command-line flags override values from this file.
+# ============================================================
+
+camera:
+  # Stable color-node path for D435i serial 035323051042.
+  device: "/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i_Intel_R__RealSense_TM__Depth_Camera_435i_035323051042-video-index0"
+  width: 848
+  height: 480
+  fps: 60
+  fourcc: "YUYV"
+
+  # Fixed imaging parameters for repeatable RGB-D and detector tests.
+  auto_exposure: false
+  exposure_us: 15000
+  gain: 128                     # D435i color sensor maximum
+  dynamic_framerate: false
+  power_line_frequency: 1       # 0=off, 1=50Hz, 2=60Hz, 3=auto
+  auto_white_balance: false
+  white_balance_temperature: 4600
+
+  buffer_count: 1
+  warmup_frames: 120
+  strict: true
+
+depth:
+  enabled: true
+  serial: "035422071550"        # librealsense Serial Number (not ASIC serial)
+  object_diameter_m: 0.215       # Volleyball physical diameter
+  bbox_scale: 0.95              # Detector bbox/projected diameter calibration
+  min_m: 0.20
+  max_m: 12.0
+
+  # Center plus three concentric rings on the visible ball surface. Each
+  # location uses a local 3x3 median; center candidates are fused by MAD.
+  sample_radius_scale: 0.68
+  sample_rings: 3
+  samples_per_ring: 12
+  patch_radius: 1
+  min_samples: 6
+  mad_scale: 3.0
+  max_spread_m: 0.12
+  mono_consistency_relative: 0.45
+  mono_consistency_absolute_m: 0.75
+
+  spatial_filter: true
+  temporal_filter: false         # Avoid motion trails on a fast volleyball
+  hole_filling_filter: false     # Robust multi-point sampling handles holes
+  draw_samples: true
+  show_colormap: false
+
+detector:
+  model_path: "../model/yolo26n_nashm_640x640_nv12.hbm"
+  label_file: "../model/yolo26_classes.names"
+  score_threshold: 0.05
+  nms_threshold: 0.45
+
+display:
+  enabled: true
+  fullscreen: false
+  width: 1280
+  height: 720
+
+recording:
+  video_path: ""
+  snapshot_dir: ""
+  snapshot_interval: 0
+
+tracking:
+  enabled: false                 # Trajectory/control runs in catch_controller
+  min_init_frames: 3
+  max_lost_frames: 8
+  process_accel_mps2: 30.0
+  innovation_gate_chi2: 11.34
+  min_detection_confidence: 0.10
+  min_depth_samples: 8
+  max_depth_spread_m: 0.10
+  max_rgbd_mono_delta_m: 0.80
+
+trajectory:
+  enabled: true
+  student_t_nu: 12.0
+  q_position: 0.0001
+  q_velocity: 1.5
+  gravity_mps2: 9.81
+  ball_mass_kg: 0.270
+  ball_radius_m: 0.1075
+  drag_coefficient: 0.10
+  air_density: 1.225
+  min_track_frames: 6
+  min_speed_mps: 0.5
+  max_predict_time_s: 3.0
+  rk4_dt_s: 0.008
+
+ground:
+  normal: [0.0, 1.0, 0.0]   # Camera coordinates: x right, y down, z forward
+  offset_m: -0.50            # Default floor is y=0.50 m; calibrate after mounting
+
+landing_publish:
+  # Diagnostic gate only. Control output belongs exclusively to catch_controller.
+  enabled: true
+  min_confidence: 0.70
+  min_student_weight: 0.15
+  min_time_to_land_s: 0.25
+  max_time_to_land_s: 2.20
+  min_speed_mps: 0.80
+  stable_frames: 3
+  max_stable_jump_m: 0.35
+  max_landing_sigma_m: 0.30
+  max_abs_x_m: 3.6
+  min_depth_m: 0.0
+  max_depth_m: 12.0
+  allow_fallback_observation: false
+
+d435_observation:
+  enabled: true
+  topic: "/d435/ball/observation"
+  volleyball_class_id: 0

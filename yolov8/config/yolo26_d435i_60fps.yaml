@@ -1,0 +1,65 @@
+# ============================================================
+# RDK S100P + Intel RealSense D435i color + YOLO26
+# Fixed, reproducible 960x540@60 FPS runtime configuration.
+# Explicit command-line flags override values from this file.
+# ============================================================
+
+camera:
+  # Stable by-id path; unlike /dev/video5 it does not change after replugging.
+  device: "/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i_Intel_R__RealSense_TM__Depth_Camera_435i_035323051042-video-index0"
+  width: 960
+  height: 540
+  fps: 60
+  fourcc: "YUYV"
+
+  # Fixed imaging parameters for repeatable latency and detection tests.
+  auto_exposure: false
+  exposure_us: 10000
+  gain: 128                     # D435i color sensor maximum
+  dynamic_framerate: false
+  power_line_frequency: 1       # 0=off, 1=50Hz, 2=60Hz, 3=auto
+
+  buffer_count: 1
+  warmup_frames: 120
+  strict: true
+
+depth:
+  # D435i depth does not provide a matching 960x540@60 profile. Use the
+  # 848x480 config for aligned RGB-D, or keep this legacy profile RGB-only.
+  enabled: false
+  serial: "035422071550"
+  object_diameter_m: 0.215
+  bbox_scale: 0.95
+  min_m: 0.20
+  max_m: 12.0
+  sample_radius_scale: 0.68
+  sample_rings: 3
+  samples_per_ring: 12
+  patch_radius: 1
+  min_samples: 6
+  mad_scale: 3.0
+  max_spread_m: 0.12
+  mono_consistency_relative: 0.45
+  mono_consistency_absolute_m: 0.75
+  spatial_filter: true
+  temporal_filter: false
+  hole_filling_filter: false
+  draw_samples: true
+  show_colormap: false
+
+detector:
+  model_path: "../model/yolo26n_nashm_640x640_nv12.hbm"
+  label_file: "../model/yolo26_classes.names"
+  score_threshold: 0.05
+  nms_threshold: 0.45
+
+display:
+  enabled: true
+  fullscreen: false
+  width: 1280
+  height: 720
+
+recording:
+  video_path: ""
+  snapshot_dir: "./snapshots"
+  snapshot_interval: 30

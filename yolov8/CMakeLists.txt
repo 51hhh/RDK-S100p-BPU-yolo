@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.10)
 project(ultralytics_yolo)
 set(CMAKE_BUILD_TYPE Release)
 
@@ -23,15 +23,55 @@ link_directories(/usr/hobot/lib)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(realsense2 QUIET)
+find_package(rclcpp QUIET)
+find_package(volleyball_interfaces QUIET)
+set(ROS2_LINK_LIBS "")
+
+set(REALSENSE_LINK_LIBS "")
+if(TARGET realsense2::realsense2)
+    set(REALSENSE_LINK_LIBS realsense2::realsense2)
+elseif(realsense2_FOUND AND realsense2_LIBRARY)
+    set(REALSENSE_LINK_LIBS ${realsense2_LIBRARY})
+endif()
+if(rclcpp_FOUND AND volleyball_interfaces_FOUND AND
+   TARGET volleyball_interfaces::volleyball_interfaces__rosidl_typesupport_cpp)
+    add_compile_definitions(HAVE_VOLLEYBALL_ROS2=1)
+    list(APPEND ROS2_LINK_LIBS rclcpp::rclcpp volleyball_interfaces::volleyball_interfaces__rosidl_typesupport_cpp)
+    message(STATUS "D435 volleyball observation publisher: enabled")
+else()
+    message(STATUS "D435 volleyball observation publisher: disabled")
+endif()
+
+if(NOT REALSENSE_LINK_LIBS)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(REALSENSE2 QUIET IMPORTED_TARGET realsense2)
+        if(TARGET PkgConfig::REALSENSE2)
+            set(REALSENSE_LINK_LIBS PkgConfig::REALSENSE2)
+        endif()
+    endif()
+endif()
+
+if(REALSENSE_LINK_LIBS)
+    add_compile_definitions(HAVE_REALSENSE2=1)
+    message(STATUS "RealSense RGB-D: enabled")
+else()
+    message(WARNING "librealsense2 not found: RGB-D capture will be unavailable")
+endif()
 
 # Libraries to link with targets
-SET(LINK_libs dnn hbucp gflags fmt OpenMP::OpenMP_CXX Threads::Threads ${OpenCV_LIBS})
+SET(LINK_libs dnn hbucp gflags fmt yaml-cpp OpenMP::OpenMP_CXX Threads::Threads ${OpenCV_LIBS} ${REALSENSE_LINK_LIBS} ${ROS2_LINK_LIBS})
 
 # ==================== 公共工具源文件 ====================
 set(UTILS_SRC
     utils/src/common_utils.cc
     utils/src/postprocess_utils.cc
     utils/src/preprocess_utils.cc
+    utils/src/rgbd_utils.cc
+    utils/src/trajectory_utils.cc
+    utils/src/d435_observation_publisher.cc
 )
 
 # ==================== 目标1: yolov8_usb_camera ====================

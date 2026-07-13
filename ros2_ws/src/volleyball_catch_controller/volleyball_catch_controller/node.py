@@ -1,10 +1,13 @@
-from collections import deque
 import math
+import secrets
+import threading
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PointStamped, PoseStamped
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PointStamped, PoseStamped, Vector3Stamped
+from nav_msgs.msg import Odometry, Path
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
@@ -13,9 +16,16 @@ from volleyball_interfaces.msg import (
     CatchState,
     D435BallObservation,
     NxBallObservation,
+    TimeSyncStatus,
 )
 
-from .tracking import BallisticTracker, covariance3, finite_vector
+from .tracking import (
+    BallisticTracker,
+    OdomHistory,
+    association_gate,
+    covariance3,
+    finite_vector,
+)
 
 
 IDLE, FAR_NX, WAIT_D435, NEAR_D435 = 0, 1, 2, 3
@@ -23,10 +33,6 @@ IDLE, FAR_NX, WAIT_D435, NEAR_D435 = 0, 1, 2, 3
 
 def stamp_s(stamp):
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-
-def wrap(angle):
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def yaw_of(quaternion):
@@ -75,34 +81,72 @@ class CatchController(Node):
             'd435_frame': 'camera_color_optical_frame',
             'nx_topic': '/nx/ball/observation',
             'd435_topic': '/d435/ball/observation',
+            'time_sync_topic': '/diagnostics/time_sync',
             'odom_topic': '/odom',
             'event_topic': '/catch/event',
             'goal_topic': '/auto/goal_pose',
             'goal_valid_topic': '/auto/goal_valid',
             'landing_topic': '/ball/landing',
+            'filtered_position_topic': '/ball/filtered_position',
+            'filtered_velocity_topic': '/ball/filtered_velocity',
+            'predicted_path_topic': '/ball/predicted_path',
             'state_topic': '/catch/state',
             'volleyball_class_id': 0,
             'nx_min_confidence': 0.30,
             'arrival_radius_m': 0.80,
-            'd435_confirm_frames': 1,
+            'd435_confirm_frames': 3,
             'd435_min_confidence': 0.30,
             'nx_lost_timeout_s': 0.30,
             'd435_lost_timeout_s': 0.80,
             'impact_grace_s': 0.15,
             'max_cycle_extension_s': 1.0,
-            'max_message_age_s': 0.20,
+            'nx_max_message_age_s': 0.05,
+            'd435_max_message_age_s': 0.05,
             'max_future_skew_s': 0.02,
+            'require_nx_time_sync': True,
+            'time_sync_timeout_s': 0.50,
+            'time_sync_warn_offset_s': 0.005,
+            'time_sync_reject_offset_s': 0.020,
+            'time_sync_max_uncertainty_s': 0.002,
+            'nx_max_stereo_delta_ns': 1000000,
+            'nx_max_depth_sigma_m': 0.75,
             'odom_history_s': 3.0,
             'odom_timeout_s': 0.10,
             'max_odom_gap_s': 0.05,
             'max_odom_extrapolation_s': 0.02,
             'ground_z_m': 0.0,
             'gravity_mps2': 9.81,
-            'tracker_process_accel_mps2': 20.0,
-            'tracker_innovation_gate_chi2': 11.34,
-            'far_min_updates': 3,
-            'near_min_updates': 3,
+            'drag_coefficient': 0.10,
+            'air_density': 1.225,
+            'ball_mass_kg': 0.270,
+            'ball_radius_m': 0.105,
+            'student_t_nu': 12.0,
+            'filter_q_position': 0.0001,
+            'filter_q_velocity': 1.5,
+            'filter_innovation_gate_chi2': 25.0,
+            'filter_max_dt_s': 0.5,
+            'filter_min_speed_mps': 0.5,
+            'far_min_updates': 2,
+            'near_min_updates': 2,
+            'prediction_min_confidence': 0.70,
+            'prediction_min_speed_mps': 0.80,
+            'prediction_min_student_weight': 0.15,
+            'prediction_min_time_to_land_s': 0.25,
+            'prediction_max_time_to_land_s': 2.20,
+            'prediction_stable_frames': 3,
+            'prediction_max_stable_interval_s': 0.15,
+            'prediction_max_stable_jump_m': 0.35,
+            'prediction_allow_polynomial': False,
+            'handover_position_gate_chi2': 11.34,
+            'handover_max_landing_delta_m': 0.75,
+            'handover_min_rgbd_frames': 3,
             'max_predict_time_s': 3.0,
+            'rk4_dt_s': 0.008,
+            'trajectory_step_s': 0.02,
+            'poly_min_frames': 6,
+            'trajectory_history_max': 20,
+            'diagnostics_enabled': True,
+            'diagnostics_rate_hz': 15.0,
             'default_position_variance_m2': 0.25,
             'catcher_point_base': [0.0, 0.0, 0.0],
             'nx_camera_translation': [0.0, 0.0, 0.0],
@@ -119,6 +163,15 @@ class CatchController(Node):
 
         self.nx_t, self.nx_r, self.nx_extrinsics_ok = self._load_extrinsics('nx')
         self.d435_t, self.d435_r, self.d435_extrinsics_ok = self._load_extrinsics('d435')
+
+        self.sensor_group = ReentrantCallbackGroup()
+        self.odom_group = ReentrantCallbackGroup()
+        self.control_group = MutuallyExclusiveCallbackGroup()
+        self.pending_lock = threading.Lock()
+        self.pending_nx = None
+        self.pending_d435 = None
+        self.pending_time_sync = None
+        self.pending_events = []
 
         sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -144,42 +197,84 @@ class CatchController(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.create_subscription(
-            NxBallObservation, self.p['nx_topic'], self.on_nx, sensor_qos
+        diagnostic_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
         )
         self.create_subscription(
-            D435BallObservation, self.p['d435_topic'], self.on_d435, sensor_qos
+            NxBallObservation, self.p['nx_topic'], self.on_nx, sensor_qos,
+            callback_group=self.sensor_group,
+        )
+        self.create_subscription(
+            D435BallObservation, self.p['d435_topic'], self.on_d435, sensor_qos,
+            callback_group=self.sensor_group,
+        )
+        self.create_subscription(
+            TimeSyncStatus, self.p['time_sync_topic'], self.on_time_sync, event_qos,
+            callback_group=self.sensor_group,
         )
         self.create_subscription(
             Odometry,
             self.p['odom_topic'],
             self.on_odom,
             QoSProfile(depth=20, reliability=ReliabilityPolicy.BEST_EFFORT),
+            callback_group=self.odom_group,
         )
-        self.create_subscription(CatchEvent, self.p['event_topic'], self.on_event, event_qos)
+        self.create_subscription(
+            CatchEvent, self.p['event_topic'], self.on_event, event_qos,
+            callback_group=self.sensor_group,
+        )
         self.goal_pub = self.create_publisher(PoseStamped, self.p['goal_topic'], control_qos)
         self.valid_pub = self.create_publisher(Bool, self.p['goal_valid_topic'], latched_qos)
         self.land_pub = self.create_publisher(PointStamped, self.p['landing_topic'], control_qos)
+        self.filtered_position_pub = self.create_publisher(
+            PointStamped, self.p['filtered_position_topic'], diagnostic_qos
+        )
+        self.filtered_velocity_pub = self.create_publisher(
+            Vector3Stamped, self.p['filtered_velocity_topic'], diagnostic_qos
+        )
+        self.predicted_path_pub = self.create_publisher(
+            Path, self.p['predicted_path_topic'], diagnostic_qos
+        )
         self.state_pub = self.create_publisher(CatchState, self.p['state_topic'], latched_qos)
 
-        tracker_args = {
+        common_tracker_args = {
             'gravity_mps2': self.p['gravity_mps2'],
-            'process_accel_mps2': self.p['tracker_process_accel_mps2'],
-            'innovation_gate_chi2': self.p['tracker_innovation_gate_chi2'],
+            'drag_coefficient': self.p['drag_coefficient'],
+            'air_density': self.p['air_density'],
+            'ball_mass_kg': self.p['ball_mass_kg'],
+            'ball_radius_m': self.p['ball_radius_m'],
+            'student_t_nu': self.p['student_t_nu'],
+            'q_position': self.p['filter_q_position'],
+            'q_velocity': self.p['filter_q_velocity'],
+            'innovation_gate_chi2': self.p['filter_innovation_gate_chi2'],
+            'max_dt_s': self.p['filter_max_dt_s'],
+            'min_speed_mps': self.p['filter_min_speed_mps'],
             'max_predict_time_s': self.p['max_predict_time_s'],
+            'rk4_dt_s': self.p['rk4_dt_s'],
+            'poly_min_frames': self.p['poly_min_frames'],
+            'history_max': self.p['trajectory_history_max'],
         }
         self.far_tracker = BallisticTracker(
-            min_updates=self.p['far_min_updates'], **tracker_args
+            min_updates=self.p['far_min_updates'],
+            **common_tracker_args,
         )
         self.near_tracker = BallisticTracker(
-            min_updates=self.p['near_min_updates'], **tracker_args
+            min_updates=self.p['near_min_updates'],
+            **common_tracker_args,
         )
-        self.odom = deque()
+        self.odom = OdomHistory(
+            history_s=self.p['odom_history_s'],
+            max_gap_s=self.p['max_odom_gap_s'],
+            max_extrapolation_s=self.p['max_odom_extrapolation_s'],
+        )
         self.last_odom_receive = 0.0
         self.state = IDLE
         self.source_epoch = 0
         self.catch_id = 0
-        self.next_catch_id = 1
+        self.next_catch_id = secrets.randbelow(0xFFFFFFFE) + 1
         self.nx_track_id = None
         self.arrived = False
         self.d435_confirm = 0
@@ -189,16 +284,40 @@ class CatchController(Node):
         self.last_d435_stamp = -math.inf
         self.last_nx_frame = -1
         self.last_d435_frame = -1
+        self.last_d435_epoch = 0
+        self.time_sync_epoch = 0
+        self.time_sync_offset_s = math.nan
+        self.time_sync_uncertainty_s = math.inf
+        self.time_sync_receive_s = 0.0
+        self.time_sync_ok = False
+        self.last_time_sync_warning_s = 0.0
         self.impact_time = 0.0
         self.impact_deadline = 0.0
         self.landing = None
+        self.filtered_position = None
+        self.filtered_velocity = None
+        self.predicted_trajectory = []
+        self.landing_stable_frames = {
+            CatchState.SOURCE_NX: 0,
+            CatchState.SOURCE_D435: 0,
+        }
+        self.last_landing_candidate = {
+            CatchState.SOURCE_NX: None,
+            CatchState.SOURCE_D435: None,
+        }
+        self.last_landing_candidate_time = {
+            CatchState.SOURCE_NX: None,
+            CatchState.SOURCE_D435: None,
+        }
+        self.near_rgbd_frames = 0
         self.landing_source = 0
         self.distance_to_landing = math.nan
         self.goal_valid = False
         self.reset_reason = CatchState.RESET_NONE
         self.detail = 'startup'
         self.last_state_publish = 0.0
-        self.create_timer(0.01, self.tick)
+        self.last_diagnostic_publish = 0.0
+        self.create_timer(0.01, self.tick, callback_group=self.control_group)
         self.publish_valid(False)
         self.publish_state(force=True)
 
@@ -221,61 +340,92 @@ class CatchController(Node):
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
-    def message_fresh(self, timestamp):
+    def message_fresh(self, timestamp, max_age_s):
         age = self.now_s() - timestamp
-        return -self.p['max_future_skew_s'] <= age <= self.p['max_message_age_s']
+        return -self.p['max_future_skew_s'] <= age <= max_age_s
+
+    def on_time_sync(self, message):
+        with self.pending_lock:
+            self.pending_time_sync = message
+
+    def on_nx(self, message):
+        with self.pending_lock:
+            self.pending_nx = message
+
+    def on_d435(self, message):
+        with self.pending_lock:
+            self.pending_d435 = message
+
+    def on_event(self, message):
+        with self.pending_lock:
+            self.pending_events.append(message)
+
+    def _drain_pending(self):
+        with self.pending_lock:
+            time_sync = self.pending_time_sync
+            nx_message = self.pending_nx
+            d435_message = self.pending_d435
+            events = self.pending_events
+            self.pending_time_sync = None
+            self.pending_nx = None
+            self.pending_d435 = None
+            self.pending_events = []
+        return time_sync, nx_message, d435_message, events
+
+    def _process_time_sync(self, message):
+        self.time_sync_epoch = int(message.source_epoch)
+        self.time_sync_offset_s = float(message.offset_ns) * 1e-9
+        self.time_sync_uncertainty_s = float(message.uncertainty_ns) * 1e-9
+        self.time_sync_receive_s = self.now_s()
+        self.time_sync_ok = bool(message.synchronized)
+        if (
+            abs(self.time_sync_offset_s) > self.p['time_sync_warn_offset_s']
+            and self.time_sync_receive_s - self.last_time_sync_warning_s > 1.0
+        ):
+            self.get_logger().warning(
+                f'NX clock offset is {self.time_sync_offset_s * 1e3:.2f} ms'
+            )
+            self.last_time_sync_warning_s = self.time_sync_receive_s
+
+    def nx_capture_time(self, message):
+        timestamp = stamp_s(message.header.stamp)
+        if not self.p['require_nx_time_sync']:
+            return timestamp
+        now = self.now_s()
+        sync_fresh = now - self.time_sync_receive_s <= self.p['time_sync_timeout_s']
+        sync_matches = self.time_sync_epoch == int(message.source_epoch)
+        offset_valid = (
+            math.isfinite(self.time_sync_offset_s)
+            and abs(self.time_sync_offset_s) <= self.p['time_sync_reject_offset_s']
+            and self.time_sync_uncertainty_s <= self.p['time_sync_max_uncertainty_s']
+        )
+        if not (self.time_sync_ok and sync_fresh and sync_matches and offset_valid):
+            self.detail = 'NX time synchronization invalid; observation rejected'
+            return None
+        # offset is defined as NX clock minus RDK clock.
+        return timestamp - self.time_sync_offset_s
 
     def on_odom(self, message):
         timestamp = stamp_s(message.header.stamp)
         if timestamp <= 0.0:
             timestamp = self.now_s()
         position = message.pose.pose.position
-        yaw = yaw_of(message.pose.pose.orientation)
-        if yaw is None or not finite_vector([position.x, position.y, position.z], 3):
+        orientation = message.pose.pose.orientation
+        quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]
+        if yaw_of(orientation) is None or not finite_vector([position.x, position.y, position.z], 3):
             return
-        if self.odom and timestamp <= self.odom[-1][0]:
-            return
-        self.odom.append(
-            (timestamp, np.array([position.x, position.y, position.z], dtype=float), yaw)
-        )
-        self.last_odom_receive = self.now_s()
-        while self.odom and timestamp - self.odom[0][0] > self.p['odom_history_s']:
-            self.odom.popleft()
+        if self.odom.add(
+            timestamp, [position.x, position.y, position.z], quaternion
+        ):
+            self.last_odom_receive = self.now_s()
 
     def odom_at(self, timestamp):
-        if not self.odom:
-            return None
-        if timestamp >= self.odom[-1][0]:
-            if timestamp - self.odom[-1][0] <= self.p['max_odom_extrapolation_s']:
-                return self.odom[-1][1], self.odom[-1][2]
-            return None
-        for index in range(1, len(self.odom)):
-            before, after = self.odom[index - 1], self.odom[index]
-            if before[0] <= timestamp <= after[0]:
-                gap = after[0] - before[0]
-                if gap <= 0.0 or gap > self.p['max_odom_gap_s']:
-                    return None
-                ratio = (timestamp - before[0]) / gap
-                position = before[1] * (1.0 - ratio) + after[1] * ratio
-                yaw = before[2] + wrap(after[2] - before[2]) * ratio
-                return position, yaw
-        return None
+        return self.odom.pose_at(timestamp)
 
     def transform_observation(self, position, covariance, timestamp, translation, rotation):
-        odom_pose = self.odom_at(timestamp)
-        if odom_pose is None:
-            return None
-        base_position, yaw = odom_pose
-        cosine, sine = math.cos(yaw), math.sin(yaw)
-        yaw_rotation = np.array(
-            [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
-            dtype=float,
+        return self.odom.transform_observation(
+            position, covariance, timestamp, translation, rotation
         )
-        total_rotation = yaw_rotation @ rotation
-        point_base = rotation @ np.asarray(position, dtype=float) + translation
-        point_odom = base_position + yaw_rotation @ point_base
-        covariance_odom = total_rotation @ covariance @ total_rotation.T
-        return point_odom, covariance_odom
 
     def _ordered_message(self, timestamp, frame_id, source):
         if source == 'nx':
@@ -301,7 +451,23 @@ class CatchController(Node):
         self.impact_time = 0.0
         self.impact_deadline = 0.0
         self.landing = None
+        self.filtered_position = None
+        self.filtered_velocity = None
+        self.predicted_trajectory = []
         self.landing_source = 0
+        self.landing_stable_frames = {
+            CatchState.SOURCE_NX: 0,
+            CatchState.SOURCE_D435: 0,
+        }
+        self.last_landing_candidate = {
+            CatchState.SOURCE_NX: None,
+            CatchState.SOURCE_D435: None,
+        }
+        self.last_landing_candidate_time = {
+            CatchState.SOURCE_NX: None,
+            CatchState.SOURCE_D435: None,
+        }
+        self.near_rgbd_frames = 0
         self.distance_to_landing = math.nan
         self.reset_reason = CatchState.RESET_NONE
         self.detail = 'new NX observation cycle'
@@ -310,25 +476,136 @@ class CatchController(Node):
         self.last_nx_stamp = -math.inf
         self.last_nx_frame = -1
 
-    def _update_landing(self, tracker, source, timestamp):
-        prediction = tracker.landing(self.p['ground_z_m'])
+    def _reset_prediction_gate(self, source=None):
+        sources = (
+            (CatchState.SOURCE_NX, CatchState.SOURCE_D435)
+            if source is None
+            else (source,)
+        )
+        for current_source in sources:
+            self.landing_stable_frames[current_source] = 0
+            self.last_landing_candidate[current_source] = None
+            self.last_landing_candidate_time[current_source] = None
+
+    def _prediction_candidate(self, tracker, source, timestamp):
+        prediction = tracker.trajectory(
+            self.p['ground_z_m'], self.p['trajectory_step_s']
+        )
         if prediction is None:
-            return
-        landing, time_to_land = prediction
-        proposed_impact = timestamp + time_to_land
+            self._reset_prediction_gate(source)
+            return None
+        trajectory, time_to_land = prediction
+        landing = trajectory[-1]
+        if (
+            tracker.last_prediction_method == 'polynomial'
+            and not self.p['prediction_allow_polynomial']
+        ):
+            self._reset_prediction_gate(source)
+            return None
+        if tracker.last_prediction_confidence < self.p['prediction_min_confidence']:
+            self._reset_prediction_gate(source)
+            return None
+        if tracker.speed < self.p['prediction_min_speed_mps']:
+            self._reset_prediction_gate(source)
+            return None
+        if (
+            tracker.last_prediction_method != 'polynomial'
+            and tracker.last_student_w < self.p['prediction_min_student_weight']
+        ):
+            self._reset_prediction_gate(source)
+            return None
+        if not (
+            self.p['prediction_min_time_to_land_s']
+            <= time_to_land
+            <= self.p['prediction_max_time_to_land_s']
+        ):
+            self._reset_prediction_gate(source)
+            return None
+        previous = self.last_landing_candidate[source]
+        previous_time = self.last_landing_candidate_time[source]
+        interval = math.inf if previous_time is None else timestamp - previous_time
+        if previous is None:
+            self.landing_stable_frames[source] = 1
+        else:
+            jump = float(np.linalg.norm((landing - previous)[0:2]))
+            self.landing_stable_frames[source] = (
+                self.landing_stable_frames[source] + 1
+                if 0.0 <= interval <= self.p['prediction_max_stable_interval_s']
+                and jump <= self.p['prediction_max_stable_jump_m']
+                else 1
+            )
+        self.last_landing_candidate[source] = landing.copy()
+        self.last_landing_candidate_time[source] = float(timestamp)
+        if self.landing_stable_frames[source] < self.p['prediction_stable_frames']:
+            self.detail = 'landing prediction stabilizing'
+            return None
+        return {
+            'landing': landing.copy(),
+            'trajectory': [point.copy() for point in trajectory],
+            'time_to_land': float(time_to_land),
+            'confidence': float(tracker.last_prediction_confidence),
+        }
+
+    def _commit_candidate(self, tracker, source, timestamp, candidate):
+        if candidate is None:
+            return False
+        proposed_impact = timestamp + candidate['time_to_land']
         if not math.isfinite(proposed_impact) or proposed_impact <= self.now_s():
-            return
+            return False
         if self.impact_deadline <= 0.0:
             self.impact_deadline = proposed_impact + self.p['max_cycle_extension_s']
         self.impact_time = min(proposed_impact, self.impact_deadline)
-        self.landing = landing
+        self.landing = candidate['landing']
         self.landing_source = source
+        self.filtered_position = tracker.position
+        self.filtered_velocity = tracker.velocity
+        self.predicted_trajectory = candidate['trajectory']
+        return True
 
-    def on_nx(self, message):
-        timestamp = stamp_s(message.header.stamp)
+    def _set_filter_diagnostics(self, tracker, source, candidate=None):
+        active = (
+            source == CatchState.SOURCE_NX and self.state != NEAR_D435
+        ) or (
+            source == CatchState.SOURCE_D435 and self.state == NEAR_D435
+        )
+        if not active:
+            return
+        self.filtered_position = tracker.position
+        self.filtered_velocity = tracker.velocity
+        if candidate is not None:
+            self.predicted_trajectory = candidate['trajectory']
+
+    def _handover_consistent(self, timestamp, candidate):
+        far_state = self.far_tracker.predict_state(timestamp)
+        if far_state is None or self.near_tracker.position is None:
+            return False
+        far_position, _, far_covariance = far_state
+        near_position = self.near_tracker.position
+        near_covariance = self.near_tracker.position_covariance
+        accepted, _ = association_gate(
+            far_position,
+            far_covariance,
+            near_position,
+            near_covariance,
+            self.p['handover_position_gate_chi2'],
+        )
+        if not accepted:
+            self.detail = 'D435 candidate rejected by NX position gate'
+            return False
+        if self.landing is not None:
+            landing_delta = float(np.linalg.norm(candidate['landing'] - self.landing))
+            if landing_delta > self.p['handover_max_landing_delta_m']:
+                self.detail = 'D435 candidate rejected by landing consistency gate'
+                return False
+        return True
+
+    def _process_nx(self, message):
+        timestamp = self.nx_capture_time(message)
+        if timestamp is None:
+            return
         frame_id = int(message.frame_id)
         valid = (
-            self.message_fresh(timestamp)
+            self.message_fresh(timestamp, self.p['nx_max_message_age_s'])
             and message.header.frame_id == self.p['nx_frame']
             and int(message.class_id) == self.p['volleyball_class_id']
             and message.detection_valid
@@ -338,6 +615,10 @@ class CatchController(Node):
             and valid_bbox(message.bbox_left_xyxy)
             and valid_bbox(message.bbox_right_xyxy)
             and finite_vector([message.position.x, message.position.y, message.position.z], 3)
+            and abs(int(message.stereo_timestamp_delta_ns))
+            <= self.p['nx_max_stereo_delta_ns']
+            and math.isfinite(float(message.depth_sigma_m))
+            and 0.0 <= float(message.depth_sigma_m) <= self.p['nx_max_depth_sigma_m']
         )
         if not valid:
             return
@@ -369,14 +650,41 @@ class CatchController(Node):
             self.detail = 'waiting for odom at NX capture time'
             return
         position, covariance_odom = transformed
-        if self.far_tracker.update(position, covariance_odom, timestamp):
-            self._update_landing(self.far_tracker, CatchState.SOURCE_NX, timestamp)
+        if self.far_tracker.update(
+            position,
+            covariance_odom,
+            timestamp,
+            trust=float(np.clip(message.match_confidence, 0.0, 1.0)),
+            consistency=1.0,
+        ):
+            candidate = self._prediction_candidate(
+                self.far_tracker, CatchState.SOURCE_NX, timestamp
+            )
+            self._set_filter_diagnostics(
+                self.far_tracker, CatchState.SOURCE_NX, candidate
+            )
+            self._commit_candidate(
+                self.far_tracker, CatchState.SOURCE_NX, timestamp, candidate
+            )
 
-    def on_d435(self, message):
+    def _process_d435(self, message):
         timestamp = stamp_s(message.header.stamp)
         frame_id = int(message.frame_id)
+        source_epoch = int(message.source_epoch)
+        if self.last_d435_epoch and source_epoch != self.last_d435_epoch:
+            if self.state == NEAR_D435:
+                self.reset(CatchState.RESET_BALL_LOST, 'D435 source epoch changed')
+                return
+            self.near_tracker.reset()
+            self.near_rgbd_frames = 0
+            self.d435_confirm = 0
+            self._reset_prediction_gate(CatchState.SOURCE_D435)
+            self.last_d435_stamp = -math.inf
+            self.last_d435_frame = -1
+        self.last_d435_epoch = source_epoch
         detection_valid = (
-            self.message_fresh(timestamp)
+            self.message_fresh(timestamp, self.p['d435_max_message_age_s'])
+            and source_epoch != 0
             and message.header.frame_id == self.p['d435_frame']
             and int(message.class_id) == self.p['volleyball_class_id']
             and message.detection_valid
@@ -392,17 +700,13 @@ class CatchController(Node):
             self.d435_confirm = 0
             return
 
+        if self.state not in (WAIT_D435, NEAR_D435) or not message.rgbd_valid:
+            return
         if (
-            self.state == WAIT_D435
-            and self.arrived
-            and self.d435_confirm >= self.p['d435_confirm_frames']
-            and self.d435_extrinsics_ok
+            int(message.valid_depth_samples) <= 0
+            or not math.isfinite(float(message.depth_spread_m))
+            or float(message.depth_spread_m) < 0.0
         ):
-            self.state = NEAR_D435
-            self.detail = 'D435 detected after base arrival; holding NX landing'
-            self.near_tracker.reset()
-
-        if self.state != NEAR_D435 or not message.rgbd_valid:
             return
         position = [message.position.x, message.position.y, message.position.z]
         if not finite_vector(position, 3):
@@ -417,12 +721,52 @@ class CatchController(Node):
             self.detail = 'waiting for odom at D435 capture time'
             return
         position_odom, covariance_odom = transformed
-        if self.near_tracker.update(position_odom, covariance_odom, timestamp):
-            if self.near_tracker.ready:
+        sample_trust = min(1.0, float(message.valid_depth_samples) / 32.0)
+        spread_trust = math.exp(-max(0.0, float(message.depth_spread_m)) / 0.10)
+        if self.near_tracker.update(
+            position_odom,
+            covariance_odom,
+            timestamp,
+            trust=sample_trust * spread_trust,
+            consistency=1.0,
+        ):
+            self.near_rgbd_frames += 1
+            candidate = self._prediction_candidate(
+                self.near_tracker, CatchState.SOURCE_D435, timestamp
+            )
+            self._set_filter_diagnostics(
+                self.near_tracker, CatchState.SOURCE_D435, candidate
+            )
+            if self.state == WAIT_D435:
+                if (
+                    self.arrived
+                    and self.d435_confirm >= self.p['d435_confirm_frames']
+                    and self.near_rgbd_frames >= self.p['handover_min_rgbd_frames']
+                    and self.d435_extrinsics_ok
+                    and candidate is not None
+                    and self._handover_consistent(timestamp, candidate)
+                ):
+                    self.state = NEAR_D435
+                    self.detail = 'D435 handover committed after dual-source consistency gate'
+                    self._commit_candidate(
+                        self.near_tracker,
+                        CatchState.SOURCE_D435,
+                        timestamp,
+                        candidate,
+                    )
+            else:
                 self.detail = 'D435 near-field trajectory active'
-            self._update_landing(self.near_tracker, CatchState.SOURCE_D435, timestamp)
+                self._set_filter_diagnostics(
+                    self.near_tracker, CatchState.SOURCE_D435, candidate
+                )
+                self._commit_candidate(
+                    self.near_tracker,
+                    CatchState.SOURCE_D435,
+                    timestamp,
+                    candidate,
+                )
 
-    def on_event(self, message):
+    def _process_event(self, message):
         if (
             self.state != IDLE
             and (int(message.source_epoch), int(message.catch_id))
@@ -445,6 +789,22 @@ class CatchController(Node):
         self.arrived = False
         self.d435_confirm = 0
         self.landing = None
+        self.filtered_position = None
+        self.filtered_velocity = None
+        self.predicted_trajectory = []
+        self.landing_stable_frames = {
+            CatchState.SOURCE_NX: 0,
+            CatchState.SOURCE_D435: 0,
+        }
+        self.last_landing_candidate = {
+            CatchState.SOURCE_NX: None,
+            CatchState.SOURCE_D435: None,
+        }
+        self.last_landing_candidate_time = {
+            CatchState.SOURCE_NX: None,
+            CatchState.SOURCE_D435: None,
+        }
+        self.near_rgbd_frames = 0
         self.landing_source = 0
         self.distance_to_landing = math.nan
         self.impact_time = 0.0
@@ -458,14 +818,25 @@ class CatchController(Node):
 
     def current_odom(self):
         now = self.now_s()
-        if not self.odom or now - self.last_odom_receive > self.p['odom_timeout_s']:
+        latest = self.odom.latest
+        if latest is None or now - self.last_odom_receive > self.p['odom_timeout_s']:
             return None
-        timestamp, position, yaw = self.odom[-1]
+        timestamp, position, yaw = latest
         if now - timestamp > self.p['odom_timeout_s']:
             return None
         return position, yaw
 
     def tick(self):
+        time_sync, nx_message, d435_message, events = self._drain_pending()
+        if time_sync is not None:
+            self._process_time_sync(time_sync)
+        for event in events:
+            self._process_event(event)
+        if nx_message is not None:
+            self._process_nx(nx_message)
+        if d435_message is not None:
+            self._process_d435(d435_message)
+
         now = self.now_s()
         if (
             self.state != IDLE
@@ -474,11 +845,15 @@ class CatchController(Node):
         ):
             self.reset(CatchState.RESET_IMPACT_TIME, 'impact time reached')
             return
-        if (
-            self.state in (FAR_NX, WAIT_D435)
-            and now - self.last_nx_receive > self.p['nx_lost_timeout_s']
-        ):
+        if self.state == FAR_NX and now - self.last_nx_receive > self.p['nx_lost_timeout_s']:
             self.reset(CatchState.RESET_BALL_LOST, 'NX ball lost')
+            return
+        if (
+            self.state == WAIT_D435
+            and now - self.last_nx_receive > self.p['nx_lost_timeout_s']
+            and now - self.last_d435_detection > self.p['d435_lost_timeout_s']
+        ):
+            self.reset(CatchState.RESET_BALL_LOST, 'NX and D435 ball lost during handover')
             return
         if (
             self.state == NEAR_D435
@@ -511,6 +886,9 @@ class CatchController(Node):
             self.arrived = True
             self.state = WAIT_D435
             self.d435_confirm = 0
+            self.near_rgbd_frames = 0
+            self.near_tracker.reset()
+            self._reset_prediction_gate(CatchState.SOURCE_D435)
             self.detail = 'base arrived at NX landing'
         self.publish_outputs(base_position, yaw)
         self.publish_state()
@@ -522,6 +900,7 @@ class CatchController(Node):
         landing.header.frame_id = self.p['world_frame']
         landing.point.x, landing.point.y, landing.point.z = map(float, self.landing)
         self.land_pub.publish(landing)
+        self.publish_diagnostics(stamp)
 
         required_extrinsics_ok = (
             self.nx_extrinsics_ok
@@ -545,6 +924,47 @@ class CatchController(Node):
         self.goal_pub.publish(goal)
         if not self.goal_valid:
             self.publish_valid(True)
+
+    def publish_diagnostics(self, stamp):
+        if not self.p['diagnostics_enabled']:
+            return
+        now = self.now_s()
+        rate = max(0.1, float(self.p['diagnostics_rate_hz']))
+        if now - self.last_diagnostic_publish < 1.0 / rate:
+            return
+        self.last_diagnostic_publish = now
+
+        if self.filtered_position is not None:
+            filtered = PointStamped()
+            filtered.header.stamp = stamp
+            filtered.header.frame_id = self.p['world_frame']
+            filtered.point.x, filtered.point.y, filtered.point.z = map(
+                float, self.filtered_position
+            )
+            self.filtered_position_pub.publish(filtered)
+
+        if self.filtered_velocity is not None:
+            velocity = Vector3Stamped()
+            velocity.header.stamp = stamp
+            velocity.header.frame_id = self.p['world_frame']
+            velocity.vector.x, velocity.vector.y, velocity.vector.z = map(
+                float, self.filtered_velocity
+            )
+            self.filtered_velocity_pub.publish(velocity)
+
+        if self.predicted_trajectory:
+            path = Path()
+            path.header.stamp = stamp
+            path.header.frame_id = self.p['world_frame']
+            for point in self.predicted_trajectory:
+                pose = PoseStamped()
+                pose.header = path.header
+                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = map(
+                    float, point
+                )
+                pose.pose.orientation.w = 1.0
+                path.poses.append(pose)
+            self.predicted_path_pub.publish(path)
 
     def publish_state(self, force=False):
         now = self.now_s()
@@ -573,8 +993,11 @@ class CatchController(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = CatchController()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

@@ -6,34 +6,72 @@ catch_controller:
     d435_frame: camera_color_optical_frame
     nx_topic: /nx/ball/observation
     d435_topic: /d435/ball/observation
+    time_sync_topic: /diagnostics/time_sync
     odom_topic: /odom
     event_topic: /catch/event
     goal_topic: /auto/goal_pose
     goal_valid_topic: /auto/goal_valid
     landing_topic: /ball/landing
+    filtered_position_topic: /ball/filtered_position
+    filtered_velocity_topic: /ball/filtered_velocity
+    predicted_path_topic: /ball/predicted_path
     state_topic: /catch/state
     volleyball_class_id: 0
     nx_min_confidence: 0.30
     arrival_radius_m: 0.80
-    d435_confirm_frames: 1
+    d435_confirm_frames: 3
     d435_min_confidence: 0.30
     nx_lost_timeout_s: 0.30
     d435_lost_timeout_s: 0.80
     impact_grace_s: 0.15
     max_cycle_extension_s: 1.0
-    max_message_age_s: 0.20
+    nx_max_message_age_s: 0.05
+    d435_max_message_age_s: 0.05
     max_future_skew_s: 0.02
+    require_nx_time_sync: true
+    time_sync_timeout_s: 0.50
+    time_sync_warn_offset_s: 0.005
+    time_sync_reject_offset_s: 0.020
+    time_sync_max_uncertainty_s: 0.002
+    nx_max_stereo_delta_ns: 1000000
+    nx_max_depth_sigma_m: 0.75
     odom_history_s: 3.0
     odom_timeout_s: 0.10
     max_odom_gap_s: 0.05
     max_odom_extrapolation_s: 0.02
     ground_z_m: 0.0
     gravity_mps2: 9.81
-    tracker_process_accel_mps2: 20.0
-    tracker_innovation_gate_chi2: 11.34
-    far_min_updates: 3
-    near_min_updates: 3
+    drag_coefficient: 0.10
+    air_density: 1.225
+    ball_mass_kg: 0.270
+    ball_radius_m: 0.105
+    student_t_nu: 12.0
+    filter_q_position: 0.0001
+    filter_q_velocity: 1.5
+    filter_innovation_gate_chi2: 25.0
+    filter_max_dt_s: 0.5
+    filter_min_speed_mps: 0.5
+    far_min_updates: 2
+    near_min_updates: 2
+    prediction_min_confidence: 0.70
+    prediction_min_speed_mps: 0.80
+    prediction_min_student_weight: 0.15
+    prediction_min_time_to_land_s: 0.25
+    prediction_max_time_to_land_s: 2.20
+    prediction_stable_frames: 3
+    prediction_max_stable_interval_s: 0.15
+    prediction_max_stable_jump_m: 0.35
+    prediction_allow_polynomial: false
+    handover_position_gate_chi2: 11.34
+    handover_max_landing_delta_m: 0.75
+    handover_min_rgbd_frames: 3
     max_predict_time_s: 3.0
+    rk4_dt_s: 0.008
+    trajectory_step_s: 0.02
+    poly_min_frames: 6
+    trajectory_history_max: 20
+    diagnostics_enabled: true
+    diagnostics_rate_hz: 15.0
     default_position_variance_m2: 0.25
     catcher_point_base: [0.0, 0.0, 0.0]
     nx_camera_translation: [0.0, 0.0, 0.0]

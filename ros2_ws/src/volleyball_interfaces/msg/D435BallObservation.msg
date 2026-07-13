@@ -1,4 +1,5 @@
 std_msgs/Header header
+uint32 source_epoch
 uint32 frame_id
 int32 class_id
 float32 detection_confidence

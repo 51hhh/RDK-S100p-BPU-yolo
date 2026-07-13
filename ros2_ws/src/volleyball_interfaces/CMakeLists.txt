@@ -9,6 +9,7 @@ find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/NxBallObservation.msg"
+  "msg/TimeSyncStatus.msg"
   "msg/D435BallObservation.msg"
   "msg/CatchEvent.msg"
   "msg/CatchState.msg"

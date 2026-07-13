@@ -48,6 +48,7 @@ int64 stereo_timestamp_delta_ns
 
 ```text
 std_msgs/Header header
+uint32 source_epoch
 uint32 frame_id
 int32 class_id
 float32 detection_confidence
@@ -67,6 +68,7 @@ bool mono_valid
 约定：
 
 - `header.frame_id=camera_color_optical_frame`。
+- `source_epoch` 在 D435 视觉进程启动时随机生成，用于识别进程重启和帧号回绕。
 - `position` 是对齐到彩色坐标的球心 RGB-D 三维坐标。
 - `detection_valid` 可触发远近场切换；`rgbd_valid` 才能作为高质量近场测量。
 - 没有有效 RGB-D 时，`position` 填 NaN，不允许用零表示无效。
@@ -89,6 +91,22 @@ uint8 FAILED=3
 
 控制节点只处理当前 `source_epoch + catch_id` 对应的事件。当前需求中 `RETURNED`
 立即触发复位；`CAUGHT/FAILED` 保留给后续机构逻辑，也建议复位。
+
+## TimeSyncStatus.msg
+
+话题：`/diagnostics/time_sync`
+
+```text
+std_msgs/Header header
+uint32 source_epoch
+int64 offset_ns
+uint64 uncertainty_ns
+bool synchronized
+```
+
+`offset_ns = NX时钟 - RDK时钟`。RDK 将 NX 图像时间减去该偏差后再查询历史 odom。
+状态必须与当前 NX `source_epoch` 一致并持续刷新；偏差超过 5 ms 报警，超过 20 ms
+或不确定度超过配置阈值时拒绝远场观测。
 
 ## CatchState.msg
 
@@ -131,6 +149,9 @@ uint8 RESET_BALL_LOST=3
 | `/auto/goal_pose` | `geometry_msgs/PoseStamped` | 控制节点 | `base_link` 下当前接球目标 |
 | `/auto/goal_valid` | `std_msgs/Bool` | 控制节点 | 目标是否可执行 |
 | `/ball/landing` | `geometry_msgs/PointStamped` | 控制节点 | `odom` 下当前选中落点 |
+| `/ball/filtered_position` | `geometry_msgs/PointStamped` | 控制节点 | `odom` 下当前活动卡尔曼滤波位置 |
+| `/ball/filtered_velocity` | `geometry_msgs/Vector3Stamped` | 控制节点 | `odom` 下当前活动卡尔曼滤波速度 |
+| `/ball/predicted_path` | `nav_msgs/Path` | 控制节点 | `odom` 下从当前状态到预测落点的弹道 |
 
 `/auto/goal_pose` 只允许一个发布者。底盘必须同时检查 `goal_valid` 和目标消息年龄，
 建议超过 200 ms 未更新自动失效。
@@ -141,12 +162,16 @@ uint8 RESET_BALL_LOST=3
 |---|---|---:|---|---:|
 | `/nx/ball/observation` | Best effort | Keep last 1 | Volatile | 50 ms |
 | `/d435/ball/observation` | Best effort | Keep last 1 | Volatile | 40 ms |
+| `/diagnostics/time_sync` | Reliable | Keep last 10 | Volatile | 500 ms |
 | `/odom` | Best effort | Keep last 20 | Volatile | 20 ms |
 | `/catch/event` | Reliable | Keep last 10 | Volatile | 无 |
 | `/auto/goal_pose` | Reliable | Keep last 1 | Volatile | 100 ms |
 | `/auto/goal_valid` | Reliable | Keep last 1 | Transient local | 无 |
 | `/catch/state` | Reliable | Keep last 1 | Transient local | 无 |
 | `/ball/landing` | Reliable | Keep last 3 | Volatile | 无 |
+| `/ball/filtered_position` | Best effort | Keep last 1 | Volatile | 无 |
+| `/ball/filtered_velocity` | Best effort | Keep last 1 | Volatile | 无 |
+| `/ball/predicted_path` | Best effort | Keep last 1 | Volatile | 无 |
 
 视觉数据使用 Best Effort 是为了丢弃旧帧而不是积压重传；控制事件、状态和有效性必须
 可靠。订阅回调只写入无锁/短锁缓存，轨迹和控制在独立定时线程运行，网络回调中不得做

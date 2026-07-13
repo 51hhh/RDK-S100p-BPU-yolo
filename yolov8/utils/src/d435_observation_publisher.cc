@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <random>
 
 #ifdef HAVE_VOLLEYBALL_ROS2
 #include <rclcpp/rclcpp.hpp>
@@ -28,6 +29,7 @@ bool validDetection(const Detection& detection)
 struct D435ObservationPublisher::Impl {
     bool enabled{false};
     int class_id{0};
+    uint32_t source_epoch{0};
 #ifdef HAVE_VOLLEYBALL_ROS2
     rclcpp::Node::SharedPtr node;
     rclcpp::Publisher<volleyball_interfaces::msg::D435BallObservation>::SharedPtr publisher;
@@ -41,6 +43,8 @@ D435ObservationPublisher::D435ObservationPublisher(bool enabled,
 {
     impl_->enabled = enabled;
     impl_->class_id = class_id;
+    impl_->source_epoch = std::random_device{}();
+    if (impl_->source_epoch == 0) impl_->source_epoch = 1;
 #ifdef HAVE_VOLLEYBALL_ROS2
     if (enabled) {
         if (!rclcpp::ok()) {
@@ -104,6 +108,7 @@ void D435ObservationPublisher::publish(
     message.header.stamp.nanosec =
         static_cast<uint32_t>(timestamp_ns % 1000000000LL);
     message.header.frame_id = "camera_color_optical_frame";
+    message.source_epoch = impl_->source_epoch;
     message.frame_id = frame_id;
     message.class_id = impl_->class_id;
 

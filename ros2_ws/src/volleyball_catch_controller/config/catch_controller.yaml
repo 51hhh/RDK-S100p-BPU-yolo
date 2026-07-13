@@ -1,5 +1,6 @@
 catch_controller:
   ros__parameters:
+    sensor_mode: joint
     world_frame: odom
     base_frame: base_link
     nx_frame: nx_left_rectified_optical_frame
@@ -50,11 +51,12 @@ catch_controller:
     max_odom_gap_s: 0.05
     max_odom_extrapolation_s: 0.02
     ground_z_m: 0.0
+    intercept_plane_z_m: 0.1075
     gravity_mps2: 9.81
     drag_coefficient: 0.10
     air_density: 1.225
     ball_mass_kg: 0.270
-    ball_radius_m: 0.105
+    ball_radius_m: 0.1075
     student_t_nu: 12.0
     filter_q_position: 0.0001
     filter_q_velocity: 1.5

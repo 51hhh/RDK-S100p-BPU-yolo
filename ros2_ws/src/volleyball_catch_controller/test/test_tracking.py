@@ -8,6 +8,8 @@ from volleyball_catch_controller.tracking import (
     OdomHistory,
     association_gate,
     covariance3,
+    landing_to_catcher_goal,
+    quaternion_matrix,
 )
 
 
@@ -71,6 +73,21 @@ class BallisticTrackerTest(unittest.TestCase):
         self.assertGreater(len(points), 2)
         self.assertAlmostEqual(flight_time, expected_time)
         np.testing.assert_allclose(points[-1], landing)
+
+    def test_trajectory_ends_at_ball_center_contact_plane(self):
+        tracker = BallisticTracker(min_updates=3, q_velocity=0.5)
+        covariance = np.eye(3) * 0.0025
+        for index in range(6):
+            timestamp = index * 0.02
+            self.assertTrue(
+                tracker.update(
+                    [1.5 * timestamp, 0.0, 2.0 + 2.5 * timestamp - 4.905 * timestamp**2],
+                    covariance,
+                    timestamp,
+                )
+            )
+        points, _ = tracker.trajectory(0.1075, 0.01)
+        self.assertAlmostEqual(points[-1][2], 0.1075)
 
     def test_two_trackers_are_independent(self):
         far = BallisticTracker(min_updates=1)
@@ -144,6 +161,34 @@ class BallisticTrackerTest(unittest.TestCase):
 
 
 class OdomHistoryTest(unittest.TestCase):
+    def test_nominal_d435_mount_rotation_maps_optical_axes(self):
+        rotation = quaternion_matrix(
+            [-0.43045933, 0.43045933, -0.56098553, 0.56098553]
+        )
+        pitch = math.radians(15.0)
+        np.testing.assert_allclose(
+            rotation @ [0.0, 0.0, 1.0],
+            [math.cos(pitch), 0.0, math.sin(pitch)],
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            rotation @ [1.0, 0.0, 0.0], [0.0, -1.0, 0.0], atol=1e-7
+        )
+        np.testing.assert_allclose(
+            rotation @ [0.0, 1.0, 0.0],
+            [math.sin(pitch), 0.0, -math.cos(pitch)],
+            atol=1e-7,
+        )
+
+    def test_landing_goal_accounts_for_catcher_offset(self):
+        goal = landing_to_catcher_goal(
+            [1.0, 0.0, 0.1075],
+            [0.0, 0.0, 0.0],
+            0.0,
+            [0.2, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(goal, [0.8, 0.0])
+
     def test_interpolates_pose_and_compensates_camera_observation(self):
         history = OdomHistory(history_s=3.0, max_gap_s=1.1, max_extrapolation_s=0.1)
         self.assertTrue(history.add(1.0, [0.0, 0.0, 0.0], 0.0))

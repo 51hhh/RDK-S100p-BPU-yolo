@@ -32,6 +32,7 @@ from .tracking import (
     association_gate,
     covariance3,
     finite_vector,
+    landing_to_catcher_goal,
 )
 
 
@@ -71,6 +72,7 @@ class CatchController(Node):
     def __init__(self):
         super().__init__('catch_controller')
         defaults = {
+            'sensor_mode': 'joint',
             'world_frame': 'odom',
             'base_frame': 'base_link',
             'nx_frame': 'nx_left_rectified_optical_frame',
@@ -120,6 +122,7 @@ class CatchController(Node):
             'max_odom_gap_s': 0.05,
             'max_odom_extrapolation_s': 0.02,
             'ground_z_m': 0.0,
+            'intercept_plane_z_m': 0.1075,
             'gravity_mps2': 9.81,
             'drag_coefficient': 0.10,
             'air_density': 1.225,
@@ -165,6 +168,12 @@ class CatchController(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {name: self.get_parameter(name).value for name in defaults}
+        self.sensor_mode = str(self.p['sensor_mode']).strip().lower()
+        if self.sensor_mode not in ('joint', 'd435_only'):
+            raise ValueError(
+                f"sensor_mode must be 'joint' or 'd435_only', got {self.sensor_mode!r}"
+            )
+        self.d435_only = self.sensor_mode == 'd435_only'
 
         self.nx_t, self.nx_r, self.nx_extrinsics_ok = self._load_extrinsics('nx')
         self.d435_t, self.d435_r, self.d435_extrinsics_ok = self._load_extrinsics('d435')
@@ -234,21 +243,25 @@ class CatchController(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
-        self.create_subscription(
-            NxBallObservation, self.p['nx_topic'], self.on_nx, nx_qos,
-            callback_group=self.sensor_group,
-            event_callbacks=self._subscription_events('nx'),
-        )
+        self.nx_subscription = None
+        self.time_sync_subscription = None
+        if not self.d435_only:
+            self.nx_subscription = self.create_subscription(
+                NxBallObservation, self.p['nx_topic'], self.on_nx, nx_qos,
+                callback_group=self.sensor_group,
+                event_callbacks=self._subscription_events('nx'),
+            )
         self.create_subscription(
             D435BallObservation, self.p['d435_topic'], self.on_d435, d435_qos,
             callback_group=self.sensor_group,
             event_callbacks=self._subscription_events('d435'),
         )
-        self.create_subscription(
-            TimeSyncStatus, self.p['time_sync_topic'], self.on_time_sync, time_sync_qos,
-            callback_group=self.sensor_group,
-            event_callbacks=self._subscription_events('time_sync'),
-        )
+        if not self.d435_only:
+            self.time_sync_subscription = self.create_subscription(
+                TimeSyncStatus, self.p['time_sync_topic'], self.on_time_sync, time_sync_qos,
+                callback_group=self.sensor_group,
+                event_callbacks=self._subscription_events('time_sync'),
+            )
         self.create_subscription(
             Odometry,
             self.p['odom_topic'],
@@ -518,10 +531,10 @@ class CatchController(Node):
             position, covariance, timestamp, translation, rotation
         )
 
-    def _start_cycle(self, message):
-        self.state = FAR_NX
-        self.source_epoch = int(message.source_epoch)
-        self.nx_track_id = int(message.track_id)
+    def _initialize_cycle(self, state, source_epoch, detail):
+        self.state = int(state)
+        self.source_epoch = int(source_epoch)
+        self.nx_track_id = None
         self.catch_id = self.next_catch_id
         self.next_catch_id = 1 if self.next_catch_id == 0xFFFFFFFF else self.next_catch_id + 1
         self.arrived = False
@@ -548,11 +561,25 @@ class CatchController(Node):
         self.near_rgbd_frames = 0
         self.distance_to_landing = math.nan
         self.reset_reason = CatchState.RESET_NONE
-        self.detail = 'new NX observation cycle'
+        self.detail = str(detail)
         self.far_tracker.reset()
         self.near_tracker.reset()
         self.last_nx_stamp = -math.inf
         self.last_nx_frame = -1
+
+    def _start_cycle(self, message):
+        self._initialize_cycle(
+            FAR_NX, int(message.source_epoch), 'new NX observation cycle'
+        )
+        self.nx_track_id = int(message.track_id)
+
+    def _start_d435_cycle(self, message):
+        self._initialize_cycle(
+            NEAR_D435,
+            int(message.source_epoch),
+            'new D435-only observation cycle',
+        )
+        self.d435_confirm = 1
 
     def _reset_prediction_gate(self, source=None):
         sources = (
@@ -567,7 +594,7 @@ class CatchController(Node):
 
     def _prediction_candidate(self, tracker, source, timestamp):
         prediction = tracker.trajectory(
-            self.p['ground_z_m'], self.p['trajectory_step_s']
+            self.p['intercept_plane_z_m'], self.p['trajectory_step_s']
         )
         if prediction is None:
             self._reset_prediction_gate(source)
@@ -678,6 +705,8 @@ class CatchController(Node):
         return True
 
     def _process_nx(self, message):
+        if self.d435_only:
+            return
         timestamp = self.nx_capture_time(message)
         if timestamp is None:
             return
@@ -799,7 +828,12 @@ class CatchController(Node):
             self.d435_confirm = 0
             return
 
-        if self.state not in (WAIT_D435, NEAR_D435) or not message.rgbd_valid:
+        eligible_state = (
+            self.state in (IDLE, NEAR_D435)
+            if self.d435_only
+            else self.state in (WAIT_D435, NEAR_D435)
+        )
+        if not eligible_state or not message.rgbd_valid:
             return
         if not d435_timing_valid(
             message.rgb_depth_timestamp_delta_ns,
@@ -829,6 +863,8 @@ class CatchController(Node):
             self.detail = 'waiting for odom at D435 capture time'
             return
         position_odom, covariance_odom = transformed
+        if self.d435_only and self.state == IDLE:
+            self._start_d435_cycle(message)
         sample_trust = min(1.0, float(message.valid_depth_samples) / 32.0)
         spread_trust = math.exp(-max(0.0, float(message.depth_spread_m)) / 0.10)
         if self.near_tracker.update(
@@ -1023,13 +1059,19 @@ class CatchController(Node):
                 self.publish_valid(False)
             return
 
-        delta = self.landing - base_position
-        cosine, sine = math.cos(yaw), math.sin(yaw)
+        goal_xy = landing_to_catcher_goal(
+            self.landing, base_position, yaw, self.p['catcher_point_base']
+        )
+        if goal_xy is None:
+            if self.goal_valid:
+                self.publish_valid(False)
+            self.detail = 'landing/catcher transform invalid; control inhibited'
+            return
         goal = PoseStamped()
         goal.header.stamp = stamp
         goal.header.frame_id = self.p['base_frame']
-        goal.pose.position.x = float(cosine * delta[0] + sine * delta[1])
-        goal.pose.position.y = float(-sine * delta[0] + cosine * delta[1])
+        goal.pose.position.x = float(goal_xy[0])
+        goal.pose.position.y = float(goal_xy[1])
         goal.pose.position.z = 0.0
         goal.pose.orientation.w = 1.0
         self.goal_pub.publish(goal)
@@ -1125,19 +1167,28 @@ class CatchController(Node):
         message.odom_rejected = self.transport['odom']['rejected']
         message.nx_epoch_changes = self.transport['nx']['epoch_changes']
         message.d435_epoch_changes = self.transport['d435']['epoch_changes']
+        required_links = [
+            ('d435', d435_online),
+            ('odom', odom_online),
+        ] if self.d435_only else [
+            ('nx', nx_online),
+            ('d435', d435_online),
+            ('time_sync', time_sync_online),
+            ('odom', odom_online),
+        ]
         offline = [
             name
-            for name, online in (
-                ('nx', nx_online),
-                ('d435', d435_online),
-                ('time_sync', time_sync_online),
-                ('odom', odom_online),
-            )
+            for name, online in required_links
             if not online
         ]
         if odom_online and not odom_valid:
             offline.append('odom-invalid')
-        message.detail = 'all monitored links online' if not offline else (
+        online_detail = (
+            'all D435-only required links online'
+            if self.d435_only
+            else 'all monitored links online'
+        )
+        message.detail = online_detail if not offline else (
             'offline/stale: ' + ','.join(offline)
         )
         self.transport_pub.publish(message)

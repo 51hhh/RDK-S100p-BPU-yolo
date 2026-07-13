@@ -62,6 +62,35 @@ def wrap_angle(angle):
     return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def landing_to_catcher_goal(
+    landing_world, base_position_world, base_yaw, catcher_point_base
+):
+    """Return the planar catcher displacement expressed in ``base_link``."""
+    landing = np.asarray(landing_world, dtype=float)
+    base_position = np.asarray(base_position_world, dtype=float)
+    catcher_offset = np.asarray(catcher_point_base, dtype=float)
+    yaw = float(base_yaw)
+    if (
+        landing.shape != (3,)
+        or base_position.shape != (3,)
+        or catcher_offset.shape != (3,)
+        or not np.all(np.isfinite(landing))
+        or not np.all(np.isfinite(base_position))
+        or not np.all(np.isfinite(catcher_offset))
+        or not math.isfinite(yaw)
+    ):
+        return None
+    delta = landing - base_position
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    return np.array(
+        [
+            cosine * delta[0] + sine * delta[1] - catcher_offset[0],
+            -sine * delta[0] + cosine * delta[1] - catcher_offset[1],
+        ],
+        dtype=float,
+    )
+
+
 def normalize_quaternion(values):
     quaternion = np.asarray(values, dtype=float)
     if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)):

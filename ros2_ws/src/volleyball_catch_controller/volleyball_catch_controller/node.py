@@ -157,6 +157,7 @@ class CatchController(Node):
             'diagnostics_rate_hz': 15.0,
             'default_position_variance_m2': 0.25,
             'catcher_point_base': [0.0, 0.0, 0.0],
+            'landing_goal_correction_base': [0.0, 0.0],
             'nx_camera_translation': [0.0, 0.0, 0.0],
             'nx_camera_quaternion': [0.0, 0.0, 0.0, 1.0],
             'nx_extrinsics_calibrated': False,
@@ -1060,7 +1061,11 @@ class CatchController(Node):
             return
 
         goal_xy = landing_to_catcher_goal(
-            self.landing, base_position, yaw, self.p['catcher_point_base']
+            self.landing,
+            base_position,
+            yaw,
+            self.p['catcher_point_base'],
+            self.p['landing_goal_correction_base'],
         )
         if goal_xy is None:
             if self.goal_valid:

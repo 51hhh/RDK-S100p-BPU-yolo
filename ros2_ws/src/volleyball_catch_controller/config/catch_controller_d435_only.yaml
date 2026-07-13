@@ -1,7 +1,9 @@
 catch_controller:
   ros__parameters:
     sensor_mode: d435_only
-    intercept_plane_z_m: 0.1075
+    # Plate surface: 1.056 - 0.500 = 0.556 m above ground. The published 3D
+    # observation is the ball center, so contact occurs one radius above it.
+    intercept_plane_z_m: 0.6635
     ball_radius_m: 0.1075
 
     # base_link: x forward, y left, z up.
@@ -9,10 +11,16 @@ catch_controller:
     # upward by 15 degrees with no nominal roll/yaw offset.
     d435_camera_quaternion: [-0.43045933, 0.43045933, -0.56098553, 0.56098553]
 
-    # Measure the optical-center position in base_link before enabling motion.
-    d435_camera_translation: [0.0, 0.0, 0.0]
+    # Nominal base_link origin: ground projection directly below the D435
+    # optical center. Replace x/y if the chassis odom base_link uses another
+    # origin. Camera optical-center height is measured as 1.056 m.
+    d435_camera_translation: [0.0, 0.0, 1.056]
     d435_extrinsics_calibrated: false
     require_calibrated_extrinsics: true
 
-    # Measure the catcher/contact point relative to base_link as well.
-    catcher_point_base: [0.0, 0.0, 0.0]
+    # Plate center is 0.591 m forward and 0.500 m below the D435 optical center.
+    catcher_point_base: [0.591, 0.0, 0.556]
+
+    # Fine correction from repeated real ball impacts, expressed in the current
+    # base frame: x forward, y left. Keep zero during geometric calibration.
+    landing_goal_correction_base: [0.0, 0.0]

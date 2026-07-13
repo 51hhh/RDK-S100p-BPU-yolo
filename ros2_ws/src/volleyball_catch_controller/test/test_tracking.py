@@ -189,6 +189,16 @@ class OdomHistoryTest(unittest.TestCase):
         )
         np.testing.assert_allclose(goal, [0.8, 0.0])
 
+    def test_landing_goal_applies_empirical_plate_correction(self):
+        goal = landing_to_catcher_goal(
+            [1.0, 0.0, 0.6635],
+            [0.0, 0.0, 0.0],
+            0.0,
+            [0.591, 0.0, 0.556],
+            [0.03, -0.02],
+        )
+        np.testing.assert_allclose(goal, [0.439, -0.02])
+
     def test_interpolates_pose_and_compensates_camera_observation(self):
         history = OdomHistory(history_s=3.0, max_gap_s=1.1, max_extrapolation_s=0.1)
         self.assertTrue(history.add(1.0, [0.0, 0.0, 0.0], 0.0))

@@ -63,20 +63,27 @@ def wrap_angle(angle):
 
 
 def landing_to_catcher_goal(
-    landing_world, base_position_world, base_yaw, catcher_point_base
+    landing_world,
+    base_position_world,
+    base_yaw,
+    catcher_point_base,
+    goal_correction_base=(0.0, 0.0),
 ):
     """Return the planar catcher displacement expressed in ``base_link``."""
     landing = np.asarray(landing_world, dtype=float)
     base_position = np.asarray(base_position_world, dtype=float)
     catcher_offset = np.asarray(catcher_point_base, dtype=float)
+    goal_correction = np.asarray(goal_correction_base, dtype=float)
     yaw = float(base_yaw)
     if (
         landing.shape != (3,)
         or base_position.shape != (3,)
         or catcher_offset.shape != (3,)
+        or goal_correction.shape != (2,)
         or not np.all(np.isfinite(landing))
         or not np.all(np.isfinite(base_position))
         or not np.all(np.isfinite(catcher_offset))
+        or not np.all(np.isfinite(goal_correction))
         or not math.isfinite(yaw)
     ):
         return None
@@ -84,8 +91,10 @@ def landing_to_catcher_goal(
     cosine, sine = math.cos(yaw), math.sin(yaw)
     return np.array(
         [
-            cosine * delta[0] + sine * delta[1] - catcher_offset[0],
-            -sine * delta[0] + cosine * delta[1] - catcher_offset[1],
+            cosine * delta[0] + sine * delta[1] - catcher_offset[0]
+            + goal_correction[0],
+            -sine * delta[0] + cosine * delta[1] - catcher_offset[1]
+            + goal_correction[1],
         ],
         dtype=float,
     )

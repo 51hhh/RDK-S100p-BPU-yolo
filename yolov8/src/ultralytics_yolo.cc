@@ -16,8 +16,148 @@
 
 #include "ultralytics_yolo.hpp"
 
-// DFL 回归的 bin 数量
-constexpr int REG = 16;
+#include <cmath>
+#include <cstring>
+
+namespace {
+
+// IEEE-754 binary16 -> float32
+float f16_to_f32(uint16_t h)
+{
+    const uint32_t sign = (h & 0x8000u) << 16;
+    const uint32_t exp = (h >> 10) & 0x1Fu;
+    const uint32_t mant = h & 0x3FFu;
+
+    uint32_t out;
+    if (exp == 0) {
+        if (mant == 0) {
+            out = sign;
+        } else {
+            // subnormal
+            uint32_t m = mant;
+            uint32_t e = 127 - 15 + 1;
+            while ((m & 0x400u) == 0) {
+                m <<= 1;
+                --e;
+            }
+            m &= 0x3FFu;
+            out = sign | (e << 23) | (m << 13);
+        }
+    } else if (exp == 31) {
+        out = sign | 0x7F800000u | (mant << 13); // inf/nan
+    } else {
+        out = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+
+    float result;
+    std::memcpy(&result, &out, sizeof(result));
+    return result;
+}
+
+float quant_scale(const hbDNNTensorProperties& prop, int channel)
+{
+    if (prop.quantiType != hbDNNQuantiType::SCALE ||
+        prop.scale.scaleData == nullptr ||
+        prop.scale.scaleLen <= 0) {
+        return 1.0f;
+    }
+    int scale_idx = std::clamp(channel, 0, prop.scale.scaleLen - 1);
+    return prop.scale.scaleData[scale_idx];
+}
+
+int quant_zero_point(const hbDNNTensorProperties& prop, int channel)
+{
+    if (prop.quantiType != hbDNNQuantiType::SCALE ||
+        prop.scale.zeroPointData == nullptr ||
+        prop.scale.zeroPointLen <= 0) {
+        return 0;
+    }
+    int zp_idx = std::clamp(channel, 0, prop.scale.zeroPointLen - 1);
+    return prop.scale.zeroPointData[zp_idx];
+}
+
+template <typename T>
+float dequantized_value(T value, const hbDNNTensorProperties& prop, int channel)
+{
+    return (static_cast<float>(value) - static_cast<float>(quant_zero_point(prop, channel))) *
+           quant_scale(prop, channel);
+}
+
+const uint8_t* tensor_addr(const hbDNNTensor& tensor, int n, int h, int w, int c)
+{
+    const auto& prop = tensor.properties;
+    auto* base = reinterpret_cast<const uint8_t*>(tensor.sysMem.virAddr);
+    // Some HBM models report invalid/zero channel stride; fall back to element size.
+    int64_t stride0 = prop.stride[0];
+    int64_t stride1 = prop.stride[1];
+    int64_t stride2 = prop.stride[2];
+    int64_t stride3 = prop.stride[3];
+    if (stride3 <= 0) {
+        switch (prop.tensorType) {
+            case HB_DNN_TENSOR_TYPE_F32:
+            case HB_DNN_TENSOR_TYPE_S32:
+            case HB_DNN_TENSOR_TYPE_U32:
+                stride3 = 4;
+                break;
+            case HB_DNN_TENSOR_TYPE_F16:
+            case HB_DNN_TENSOR_TYPE_S16:
+            case HB_DNN_TENSOR_TYPE_U16:
+                stride3 = 2;
+                break;
+            default:
+                stride3 = 1;
+                break;
+        }
+    }
+    if (stride2 <= 0) {
+        stride2 = stride3 * std::max(1, prop.validShape.dimensionSize[3]);
+    }
+    if (stride1 <= 0) {
+        stride1 = stride2 * std::max(1, prop.validShape.dimensionSize[2]);
+    }
+    if (stride0 <= 0) {
+        stride0 = stride1 * std::max(1, prop.validShape.dimensionSize[1]);
+    }
+    return base + n * stride0 + h * stride1 + w * stride2 + c * stride3;
+}
+
+float tensor_value(const hbDNNTensor& tensor, int h, int w, int c)
+{
+    const auto& prop = tensor.properties;
+    const uint8_t* ptr = tensor_addr(tensor, 0, h, w, c);
+
+    switch (prop.tensorType) {
+        case HB_DNN_TENSOR_TYPE_F32:
+            return *reinterpret_cast<const float*>(ptr);
+        case HB_DNN_TENSOR_TYPE_F16:
+            return f16_to_f32(*reinterpret_cast<const uint16_t*>(ptr));
+        case HB_DNN_TENSOR_TYPE_S8:
+            return dequantized_value(*reinterpret_cast<const int8_t*>(ptr), prop, c);
+        case HB_DNN_TENSOR_TYPE_U8:
+            return dequantized_value(*reinterpret_cast<const uint8_t*>(ptr), prop, c);
+        case HB_DNN_TENSOR_TYPE_S16:
+            return dequantized_value(*reinterpret_cast<const int16_t*>(ptr), prop, c);
+        case HB_DNN_TENSOR_TYPE_U16:
+            return dequantized_value(*reinterpret_cast<const uint16_t*>(ptr), prop, c);
+        case HB_DNN_TENSOR_TYPE_S32:
+            return dequantized_value(*reinterpret_cast<const int32_t*>(ptr), prop, c);
+        case HB_DNN_TENSOR_TYPE_U32:
+            return dequantized_value(*reinterpret_cast<const uint32_t*>(ptr), prop, c);
+        default:
+            throw std::runtime_error("Unsupported output tensor type: " +
+                                     std::to_string(prop.tensorType));
+    }
+}
+
+float clamp_score_threshold(float score_thres)
+{
+    if (!std::isfinite(score_thres)) {
+        return 0.25f;
+    }
+    return std::clamp(score_thres, 1e-6f, 1.0f - 1e-6f);
+}
+
+}  // namespace
 
 /**
  * @brief Construct a new UltralyticsYOLO object and initialize DNN resources.
@@ -75,7 +215,21 @@ UltralyticsYOLO::UltralyticsYOLO(std::string model_path)
     std::cout << "  Input: " << input_count_ << " tensors, " << input_w_ << "x" << input_h_ << std::endl;
     std::cout << "  Output: " << output_count_ << " tensors" << std::endl;
     
-    // 打印输出张量详情用于调试
+    // 打印输入/输出张量详情用于调试
+    for (int i = 0; i < input_count_; i++) {
+        auto& prop = input_tensors_[i].properties;
+        std::cout << "    input[" << i << "] shape: ("
+                  << prop.validShape.dimensionSize[0] << ", "
+                  << prop.validShape.dimensionSize[1] << ", "
+                  << prop.validShape.dimensionSize[2] << ", "
+                  << prop.validShape.dimensionSize[3] << "), "
+                  << "tensorType: " << prop.tensorType << ", "
+                  << "stride: ("
+                  << prop.stride[0] << ", "
+                  << prop.stride[1] << ", "
+                  << prop.stride[2] << ", "
+                  << prop.stride[3] << ")" << std::endl;
+    }
     for (int i = 0; i < output_count_; i++) {
         auto& prop = output_tensors_[i].properties;
         std::cout << "    output[" << i << "] shape: ("
@@ -83,7 +237,13 @@ UltralyticsYOLO::UltralyticsYOLO(std::string model_path)
                   << prop.validShape.dimensionSize[1] << ", "
                   << prop.validShape.dimensionSize[2] << ", "
                   << prop.validShape.dimensionSize[3] << "), "
-                  << "quantiType: " << prop.quantiType << std::endl;
+                  << "tensorType: " << prop.tensorType << ", "
+                  << "quantiType: " << prop.quantiType << ", "
+                  << "stride: ("
+                  << prop.stride[0] << ", "
+                  << prop.stride[1] << ", "
+                  << prop.stride[2] << ", "
+                  << prop.stride[3] << ")" << std::endl;
     }
 }
 
@@ -120,7 +280,9 @@ void UltralyticsYOLO::pre_process(cv::Mat& bgr_mat)
     letterbox_resize(bgr_mat, resized_mat);
 
     // BGR -> NV12 input tensor
-    bgr_to_nv12_tensor(resized_mat, input_tensors_, input_h_, input_w_);
+    if (bgr_to_nv12_tensor(resized_mat, input_tensors_, input_h_, input_w_) != 0) {
+        throw std::runtime_error("BGR to NV12 preprocessing failed");
+    }
 }
 
 /**
@@ -177,6 +339,7 @@ void UltralyticsYOLO::infer()
  */
 std::vector<Detection> UltralyticsYOLO::post_process(float score_thres, float nms_thres, int img_w, int img_h)
 {
+    last_max_score_ = 0.0f;
     // 检查输出张量数量
     if (output_count_ != 6) {
         std::cerr << "[ERROR] Expected 6 output tensors, but got " << output_count_ << std::endl;
@@ -184,24 +347,32 @@ std::vector<Detection> UltralyticsYOLO::post_process(float score_thres, float nm
     }
     
     // 计算置信度阈值的原始值（利用 Sigmoid 函数的单调性）
+    score_thres = clamp_score_threshold(score_thres);
+    nms_thres = std::clamp(nms_thres, 0.0f, 1.0f);
     float conf_thres_raw = -std::log(1.0f / score_thres - 1.0f);
     
     std::vector<Detection> all_detections;
     
-    // 三个尺度的配置: stride 和 grid_size
-    const int strides[3] = {8, 16, 32};
-    const int grid_sizes[3] = {input_w_ / 8, input_w_ / 16, input_w_ / 32};  // 80, 40, 20 for 640 input
-    
     // 处理 3 个尺度的输出
     for (int scale = 0; scale < 3; scale++) {
-        int cls_idx = scale * 2;       // 0, 2, 4 - 分类输出
-        int bbox_idx = scale * 2 + 1;  // 1, 3, 5 - 边框输出
-        int stride = strides[scale];
-        int grid_size = grid_sizes[scale];
-        
-        // 获取输出张量
-        hbDNNTensor& cls_tensor = output_tensors_[cls_idx];
-        hbDNNTensor& bbox_tensor = output_tensors_[bbox_idx];
+        int first_idx = scale * 2;       // 0, 2, 4
+        int second_idx = scale * 2 + 1;  // 1, 3, 5
+
+        // The supplied exporter emits (cls, bbox) pairs. Quantized deployments
+        // may reverse a pair, so use quantization/channel evidence only when
+        // it is unambiguous and otherwise preserve exporter order.
+        hbDNNTensor* a = &output_tensors_[first_idx];
+        hbDNNTensor* b = &output_tensors_[second_idx];
+        int a_c = a->properties.validShape.dimensionSize[3];
+        int b_c = b->properties.validShape.dimensionSize[3];
+        bool a_is_bbox = a_c == 64 ||
+            (a->properties.quantiType == hbDNNQuantiType::SCALE &&
+             b->properties.quantiType != hbDNNQuantiType::SCALE);
+        bool b_is_bbox = b_c == 64 ||
+            (b->properties.quantiType == hbDNNQuantiType::SCALE &&
+             a->properties.quantiType != hbDNNQuantiType::SCALE);
+        hbDNNTensor& cls_tensor = (b_is_bbox && !a_is_bbox) ? *a : ((a_is_bbox && !b_is_bbox) ? *b : *a);
+        hbDNNTensor& bbox_tensor = (b_is_bbox && !a_is_bbox) ? *b : ((a_is_bbox && !b_is_bbox) ? *a : *b);
         
         // 检查数据指针
         if (cls_tensor.sysMem.virAddr == nullptr || bbox_tensor.sysMem.virAddr == nullptr) {
@@ -209,115 +380,110 @@ std::vector<Detection> UltralyticsYOLO::post_process(float score_thres, float nm
             continue;
         }
         
+        const auto& cls_shape = cls_tensor.properties.validShape;
+        const auto& bbox_shape = bbox_tensor.properties.validShape;
+        int feature_h = cls_shape.dimensionSize[1];
+        int feature_w = cls_shape.dimensionSize[2];
+        if (feature_h <= 0 || feature_w <= 0 ||
+            bbox_shape.dimensionSize[1] != feature_h ||
+            bbox_shape.dimensionSize[2] != feature_w) {
+            std::cerr << "[ERROR] Output tensor shape mismatch at scale " << scale
+                      << ": cls=(" << feature_h << "x" << feature_w << "), bbox=("
+                      << bbox_shape.dimensionSize[1] << "x" << bbox_shape.dimensionSize[2] << ")"
+                      << std::endl;
+            continue;
+        }
+
         // 获取类别数 (从 cls_tensor 的最后一维)
-        int num_classes = cls_tensor.properties.validShape.dimensionSize[3];
-        
-        // 获取输出数据指针 - cls 是 float
-        auto* cls_data = reinterpret_cast<float*>(cls_tensor.sysMem.virAddr);
-        
-        // 判断 bbox 是否需要反量化 (quantiType: 0=NONE, 1=SCALE)
-        bool bbox_need_dequant = (bbox_tensor.properties.quantiType == 1);
-        float* bbox_scale = bbox_tensor.properties.scale.scaleData;
-        
-        int total_anchors = grid_size * grid_size;
-        
+        int num_classes = cls_shape.dimensionSize[3];
+        if (num_classes <= 0) {
+            std::cerr << "[ERROR] Invalid class channel count: " << num_classes << std::endl;
+            continue;
+        }
+
+        int bbox_channels = bbox_tensor.properties.validShape.dimensionSize[3];
+        if (bbox_channels <= 0 || bbox_channels % 4 != 0) {
+            std::cerr << "[ERROR] Invalid bbox channel count: " << bbox_channels << std::endl;
+            continue;
+        }
+        int reg_max = bbox_channels / 4;
+
+        float stride_x = static_cast<float>(input_w_) / static_cast<float>(feature_w);
+        float stride_y = static_cast<float>(input_h_) / static_cast<float>(feature_h);
+
         // 遍历所有 anchor 位置
-        for (int anchor_idx = 0; anchor_idx < total_anchors; anchor_idx++) {
-            float* cur_cls = cls_data + anchor_idx * num_classes;
-            
-            // 找到最大分数和对应类别
-            int max_cls_id = 0;
-            float max_cls_val = cur_cls[0];
-            for (int c = 1; c < num_classes; c++) {
-                if (cur_cls[c] > max_cls_val) {
-                    max_cls_val = cur_cls[c];
-                    max_cls_id = c;
-                }
-            }
-            
-            // 检查是否超过阈值（raw 值比较）
-            if (max_cls_val < conf_thres_raw) {
-                continue;
-            }
-            
-            // 计算 Sigmoid 分数
-            float score = 1.0f / (1.0f + std::exp(-max_cls_val));
-            
-            // DFL 计算 - 对每条边进行处理
-            float ltrb[4];
-            
-            if (bbox_need_dequant) {
-                // bbox 是 int32 量化的，需要反量化
-                auto* bbox_data_int = reinterpret_cast<int32_t*>(bbox_tensor.sysMem.virAddr);
-                int32_t* cur_bbox = bbox_data_int + anchor_idx * (REG * 4);
-                
-                for (int i = 0; i < 4; i++) {
-                    float dfl_values[REG];
-                    float softmax_values[REG];
-                    
-                    // 反量化 DFL 值
-                    for (int j = 0; j < REG; j++) {
-                        int scale_idx = i * REG + j;
-                        dfl_values[j] = static_cast<float>(cur_bbox[scale_idx]) * bbox_scale[scale_idx];
+        for (int grid_y = 0; grid_y < feature_h; grid_y++) {
+            for (int grid_x = 0; grid_x < feature_w; grid_x++) {
+                // 找到最大分数和对应类别
+                int max_cls_id = 0;
+                float max_cls_val = tensor_value(cls_tensor, grid_y, grid_x, 0);
+                for (int c = 1; c < num_classes; c++) {
+                    float cls_val = tensor_value(cls_tensor, grid_y, grid_x, c);
+                    if (cls_val > max_cls_val) {
+                        max_cls_val = cls_val;
+                        max_cls_id = c;
                     }
-                    
+                }
+
+                float candidate_score = 1.0f / (1.0f + std::exp(-max_cls_val));
+                last_max_score_ = std::max(last_max_score_, candidate_score);
+
+                // 检查是否超过阈值（raw 值比较）
+                if (max_cls_val < conf_thres_raw) {
+                    continue;
+                }
+
+                // 计算 Sigmoid 分数
+                float score = candidate_score;
+
+                // DFL 计算 - 对每条边进行处理
+                float ltrb[4];
+
+                for (int i = 0; i < 4; i++) {
+                    if (reg_max == 1) {
+                        ltrb[i] = tensor_value(bbox_tensor, grid_y, grid_x, i);
+                        continue;
+                    }
+
+                    std::vector<float> dfl_values(reg_max);
+                    std::vector<float> softmax_values(reg_max);
+
+                    for (int j = 0; j < reg_max; j++) {
+                        int channel = i * reg_max + j;
+                        dfl_values[j] = tensor_value(bbox_tensor, grid_y, grid_x, channel);
+                    }
+
                     // Softmax
-                    softmax(dfl_values, softmax_values, REG);
-                    
+                    softmax(dfl_values.data(), softmax_values.data(), reg_max);
+
                     // 计算期望值（DFL 到距离的转换）
                     ltrb[i] = 0.0f;
-                    for (int j = 0; j < REG; j++) {
+                    for (int j = 0; j < reg_max; j++) {
                         ltrb[i] += softmax_values[j] * j;
                     }
                 }
-            } else {
-                // bbox 已经是 float，直接读取
-                auto* bbox_data_float = reinterpret_cast<float*>(bbox_tensor.sysMem.virAddr);
-                float* cur_bbox = bbox_data_float + anchor_idx * (REG * 4);
-                
-                for (int i = 0; i < 4; i++) {
-                    float dfl_values[REG];
-                    float softmax_values[REG];
-                    
-                    // 直接读取 float 值
-                    for (int j = 0; j < REG; j++) {
-                        int idx = i * REG + j;
-                        dfl_values[j] = cur_bbox[idx];
-                    }
-                    
-                    // Softmax
-                    softmax(dfl_values, softmax_values, REG);
-                    
-                    // 计算期望值（DFL 到距离的转换）
-                    ltrb[i] = 0.0f;
-                    for (int j = 0; j < REG; j++) {
-                        ltrb[i] += softmax_values[j] * j;
-                    }
+
+                // 计算 anchor 坐标
+                float anchor_x = grid_x + 0.5f;
+                float anchor_y = grid_y + 0.5f;
+
+                // ltrb 转 xyxy 坐标
+                float x1 = (anchor_x - ltrb[0]) * stride_x;
+                float y1 = (anchor_y - ltrb[1]) * stride_y;
+                float x2 = (anchor_x + ltrb[2]) * stride_x;
+                float y2 = (anchor_y + ltrb[3]) * stride_y;
+
+                // 检查边界框合法性
+                if (x2 > x1 && y2 > y1) {
+                    Detection det;
+                    det.bbox[0] = x1;
+                    det.bbox[1] = y1;
+                    det.bbox[2] = x2;
+                    det.bbox[3] = y2;
+                    det.score = score;
+                    det.class_id = max_cls_id;
+                    all_detections.push_back(det);
                 }
-            }
-            
-            // 计算 anchor 坐标
-            int grid_y = anchor_idx / grid_size;
-            int grid_x = anchor_idx % grid_size;
-            float anchor_x = grid_x + 0.5f;
-            float anchor_y = grid_y + 0.5f;
-            
-            // ltrb 转 xyxy 坐标
-            float x1 = (anchor_x - ltrb[0]) * stride;
-            float y1 = (anchor_y - ltrb[1]) * stride;
-            float x2 = (anchor_x + ltrb[2]) * stride;
-            float y2 = (anchor_y + ltrb[3]) * stride;
-            
-            // 检查边界框合法性
-            if (x2 > x1 && y2 > y1) {
-                Detection det;
-                det.bbox[0] = x1;
-                det.bbox[1] = y1;
-                det.bbox[2] = x2;
-                det.bbox[3] = y2;
-                det.score = score;
-                det.class_id = max_cls_id;
-                all_detections.push_back(det);
             }
         }
     }

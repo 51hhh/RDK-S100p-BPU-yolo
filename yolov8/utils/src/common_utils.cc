@@ -180,17 +180,27 @@ void draw_boxes(cv::Mat& image,
                 const std::vector<std::string>& class_names,
                 const std::vector<cv::Scalar>& colors)
 {
+    if (image.empty()) return;
+
     for (const auto& det : detections) {
-        int x1 = static_cast<int>(det.bbox[0]); // top-left x
-        int y1 = static_cast<int>(det.bbox[1]); // top-left y
-        int x2 = static_cast<int>(det.bbox[2]); // bottom-right x
-        int y2 = static_cast<int>(det.bbox[3]); // bottom-right y
+        int x1 = std::clamp(static_cast<int>(det.bbox[0]), 0, image.cols); // top-left x
+        int y1 = std::clamp(static_cast<int>(det.bbox[1]), 0, image.rows); // top-left y
+        int x2 = std::clamp(static_cast<int>(det.bbox[2]), 0, image.cols); // bottom-right x
+        int y2 = std::clamp(static_cast<int>(det.bbox[3]), 0, image.rows); // bottom-right y
         int class_id = det.class_id;
+        if (x2 <= x1 || y2 <= y1 || class_id < 0) {
+            continue;
+        }
 
         // Pick color by class id
-        cv::Scalar color = colors[class_id % colors.size()];
+        cv::Scalar color = colors.empty()
+            ? cv::Scalar(0, 255, 0)
+            : colors[static_cast<size_t>(class_id) % colors.size()];
         // Compose label "name score"
-        std::string label = class_names[class_id] + " " + cv::format("%.2f", det.score);
+        std::string class_name = (static_cast<size_t>(class_id) < class_names.size())
+            ? class_names[static_cast<size_t>(class_id)]
+            : "class_" + std::to_string(class_id);
+        std::string label = class_name + " " + cv::format("%.2f", det.score);
 
         // Draw rectangle
         cv::rectangle(image, cv::Point(x1, y1), cv::Point(x2, y2), color, 2);
@@ -199,8 +209,9 @@ void draw_boxes(cv::Mat& image,
         int baseline = 0;
         cv::Size label_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
         int y_text = std::max(y1 - 5, label_size.height);
+        int x_text = std::min(x1, std::max(0, image.cols - label_size.width - 2));
 
-        cv::putText(image, label, cv::Point(x1, y_text),
+        cv::putText(image, label, cv::Point(x_text, y_text),
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
     }
 }

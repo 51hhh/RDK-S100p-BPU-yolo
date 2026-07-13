@@ -37,9 +37,9 @@ int prepare_output_tensor(std::vector<hbDNNTensor>& output_tensor);
 /**
  * @brief Convert a BGR image to NV12 planes and upload into model input tensors.
  * @param[in]     mat           Source image in BGR color space (CV_8UC3).
- * @param[in,out] input_tensor  Target input tensors; expects two tensors:
- *                              [0] Y plane, [1] interleaved UV plane. Function writes pixel data
- *                              with correct byte strides and flushes caches.
+ * @param[in,out] input_tensor  Target input tensors; supports either one packed NV12 tensor
+ *                              or two tensors: [0] Y plane, [1] interleaved UV plane.
+ *                              Function writes pixel data with correct byte strides and flushes caches.
  * @param[in]     input_h       Target height (must be even for NV12).
  * @param[in]     input_w       Target width  (must be even for NV12).
  * @return int32_t 0 on success, -1 on invalid size or copy failure.

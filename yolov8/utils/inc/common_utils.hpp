@@ -23,6 +23,7 @@
 #include <regex>
 #include <unordered_map>
 #include <algorithm>
+#include <stdexcept>
 #include <nlohmann/json.hpp>
 #include <opencv2/freetype.hpp>
 #include "opencv2/core/mat.hpp"

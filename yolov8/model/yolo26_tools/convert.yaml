@@ -1,0 +1,33 @@
+model_parameters:
+  onnx_model: "yolo26n_split.onnx"
+  march: "nash-m"
+  layer_out_dump: false
+  working_dir: "model_output_max"
+  output_model_file_prefix: "yolo26n_nashm_640x640_nv12"
+  remove_node_name: "627;649;671"
+
+input_parameters:
+  input_name: "images"
+  input_type_rt: "nv12"
+  input_type_train: "rgb"
+  input_layout_train: "NCHW"
+  input_shape: "1x3x640x640"
+  norm_type: "data_scale"
+  mean_value: ""
+  scale_value: 0.003921568627451
+
+calibration_parameters:
+  cal_data_dir: "./calibration_data_rgb_f32"
+  cal_data_type: "float32"
+  calibration_type: "max"
+  max_percentile: 0.99995
+  per_channel: false
+  quant_config: {"op_config": {"softmax": {"qtype": "int8"}}}
+
+compiler_parameters:
+  extra_params: {"input_no_padding": true, "output_no_padding": true}
+  jobs: 16
+  compile_mode: "latency"
+  debug: true
+  advice: 1
+  optimize_level: "O2"

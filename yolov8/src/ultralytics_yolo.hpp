@@ -45,6 +45,7 @@ class UltralyticsYOLO
         std::vector<hbDNNTensor> output_tensors_;     // Output tensor storage
         int input_h_;                                 // Model expected input height in pixels
         int input_w_;                                 // Model expected input width in pixels
+        float last_max_score_{0.0f};                  // Highest class probability before thresholding
 
     public:
         /**
@@ -97,4 +98,9 @@ class UltralyticsYOLO
          * @return int Input height in pixels.
          */
         int get_input_height() const { return input_h_; }
+
+        /**
+         * @brief Highest class probability observed in the latest frame before thresholding.
+         */
+        float get_last_max_score() const { return last_max_score_; }
 };

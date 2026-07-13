@@ -86,6 +86,8 @@ catch_controller:
     diagnostics_rate_hz: 15.0
     default_position_variance_m2: 0.25
     catcher_point_base: [0.0, 0.0, 0.0]
+    use_d435_catcher_geometry: false
+    d435_catcher_offset_base: [0.0, 0.0, 0.0]
     landing_goal_correction_base: [0.0, 0.0]
     nx_camera_translation: [0.0, 0.0, 0.0]
     nx_camera_quaternion: [0.0, 0.0, 0.0, 1.0]

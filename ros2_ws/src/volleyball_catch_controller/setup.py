@@ -24,9 +24,6 @@ setup(
     entry_points={'console_scripts': [
         'catch_controller = volleyball_catch_controller.node:main',
         'goal_to_cmd_vel = volleyball_catch_controller.goal_to_cmd_vel_node:main',
-        'capture_d435_calibration_point = '
-        'volleyball_catch_controller.d435_calibration_capture_node:main',
-        'solve_d435_handeye = volleyball_catch_controller.extrinsic_calibration:main',
         'nx_time_sync_publisher = volleyball_catch_controller.nx_time_sync_node:main',
         'prepare_nx_epoch = volleyball_catch_controller.nx_epoch:main',
         'check_chassis_odom = volleyball_catch_controller.chassis_odom_check_node:main',

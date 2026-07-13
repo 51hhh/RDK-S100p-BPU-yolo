@@ -30,6 +30,7 @@ from .tracking import (
     BallisticTracker,
     OdomHistory,
     association_gate,
+    catcher_geometry_from_camera,
     covariance3,
     finite_vector,
     landing_to_catcher_goal,
@@ -157,6 +158,8 @@ class CatchController(Node):
             'diagnostics_rate_hz': 15.0,
             'default_position_variance_m2': 0.25,
             'catcher_point_base': [0.0, 0.0, 0.0],
+            'use_d435_catcher_geometry': False,
+            'd435_catcher_offset_base': [0.0, 0.0, 0.0],
             'landing_goal_correction_base': [0.0, 0.0],
             'nx_camera_translation': [0.0, 0.0, 0.0],
             'nx_camera_quaternion': [0.0, 0.0, 0.0, 1.0],
@@ -178,6 +181,24 @@ class CatchController(Node):
 
         self.nx_t, self.nx_r, self.nx_extrinsics_ok = self._load_extrinsics('nx')
         self.d435_t, self.d435_r, self.d435_extrinsics_ok = self._load_extrinsics('d435')
+        self.catcher_point_base = np.asarray(
+            self.p['catcher_point_base'], dtype=float
+        )
+        if bool(self.p['use_d435_catcher_geometry']):
+            geometry = catcher_geometry_from_camera(
+                self.d435_t,
+                self.p['d435_catcher_offset_base'],
+                self.p['ball_radius_m'],
+            )
+            if geometry is None:
+                raise ValueError('D435-to-catcher geometry is invalid')
+            self.catcher_point_base, intercept_height = geometry
+            self.p['intercept_plane_z_m'] = intercept_height
+        if (
+            self.catcher_point_base.shape != (3,)
+            or not np.all(np.isfinite(self.catcher_point_base))
+        ):
+            raise ValueError('catcher_point_base must contain three finite values')
 
         self.sensor_group = ReentrantCallbackGroup()
         self.odom_group = ReentrantCallbackGroup()
@@ -385,17 +406,27 @@ class CatchController(Node):
         translation = np.asarray(self.p[f'{prefix}_camera_translation'], dtype=float)
         rotation = quaternion_matrix(self.p[f'{prefix}_camera_quaternion'])
         explicitly_calibrated = bool(self.p[f'{prefix}_extrinsics_calibrated'])
-        valid = translation.shape == (3,) and np.all(np.isfinite(translation)) and rotation is not None
-        if self.p['require_calibrated_extrinsics']:
-            valid = valid and explicitly_calibrated
-        if not valid:
+        geometry_valid = (
+            translation.shape == (3,)
+            and np.all(np.isfinite(translation))
+            and rotation is not None
+        )
+        if not geometry_valid:
             self.get_logger().error(
-                f'{prefix} camera extrinsics are invalid or not marked calibrated; '
-                'related control output is inhibited'
+                f'{prefix} camera extrinsics are mathematically invalid; '
+                'identity is used for diagnostics and control is inhibited'
             )
             translation = np.zeros(3, dtype=float)
             rotation = np.eye(3, dtype=float)
-        return translation, rotation, valid
+        control_valid = geometry_valid and (
+            explicitly_calibrated or not self.p['require_calibrated_extrinsics']
+        )
+        if geometry_valid and not control_valid:
+            self.get_logger().error(
+                f'{prefix} camera extrinsics are not marked calibrated; '
+                'configured geometry is used for diagnostics but control is inhibited'
+            )
+        return translation, rotation, control_valid
 
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -1020,7 +1051,7 @@ class CatchController(Node):
             return
 
         base_position, yaw = odom_pose
-        catcher_offset = np.asarray(self.p['catcher_point_base'], dtype=float)
+        catcher_offset = self.catcher_point_base
         cosine, sine = math.cos(yaw), math.sin(yaw)
         yaw_rotation = np.array(
             [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
@@ -1064,7 +1095,7 @@ class CatchController(Node):
             self.landing,
             base_position,
             yaw,
-            self.p['catcher_point_base'],
+            self.catcher_point_base,
             self.p['landing_goal_correction_base'],
         )
         if goal_xy is None:

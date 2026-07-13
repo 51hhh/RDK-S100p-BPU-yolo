@@ -100,6 +100,26 @@ def landing_to_catcher_goal(
     )
 
 
+def catcher_geometry_from_camera(
+    camera_translation_base, catcher_offset_from_camera_base, ball_radius_m
+):
+    """Resolve the plate center and ball-center contact height in base axes."""
+    camera_translation = np.asarray(camera_translation_base, dtype=float)
+    catcher_offset = np.asarray(catcher_offset_from_camera_base, dtype=float)
+    ball_radius = float(ball_radius_m)
+    if (
+        camera_translation.shape != (3,)
+        or catcher_offset.shape != (3,)
+        or not np.all(np.isfinite(camera_translation))
+        or not np.all(np.isfinite(catcher_offset))
+        or not math.isfinite(ball_radius)
+        or ball_radius <= 0.0
+    ):
+        return None
+    catcher_point = camera_translation + catcher_offset
+    return catcher_point, float(catcher_point[2] + ball_radius)
+
+
 def normalize_quaternion(values):
     quaternion = np.asarray(values, dtype=float)
     if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)):

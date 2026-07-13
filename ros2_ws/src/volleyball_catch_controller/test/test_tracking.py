@@ -7,6 +7,7 @@ from volleyball_catch_controller.tracking import (
     BallisticTracker,
     OdomHistory,
     association_gate,
+    catcher_geometry_from_camera,
     covariance3,
     landing_to_catcher_goal,
     quaternion_matrix,
@@ -161,6 +162,13 @@ class BallisticTrackerTest(unittest.TestCase):
 
 
 class OdomHistoryTest(unittest.TestCase):
+    def test_catcher_geometry_comes_directly_from_camera_offset(self):
+        catcher, intercept_height = catcher_geometry_from_camera(
+            [0.0, 0.0, 1.056], [0.591, 0.0, -0.500], 0.1075
+        )
+        np.testing.assert_allclose(catcher, [0.591, 0.0, 0.556])
+        self.assertAlmostEqual(intercept_height, 0.6635)
+
     def test_nominal_d435_mount_rotation_maps_optical_axes(self):
         rotation = quaternion_matrix(
             [-0.43045933, 0.43045933, -0.56098553, 0.56098553]

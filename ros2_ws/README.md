@@ -22,11 +22,24 @@ make -j4
 
 ## 启动顺序
 
-1. 启动底盘 `/odom`。
+1. 启动舵轮底盘里程计。当前阶段直接使用底盘`nav_msgs/Odometry`，不在本仓库重复计算
+   码盘里程计，也暂不融合D435i IMU。先执行契约检查：
+
+```bash
+ros2 run volleyball_catch_controller check_chassis_odom \
+  --ros-args -p topic:=/odom
+```
+
+要求`frame_id=odom`、`child_frame_id=base_link`、时间戳属于RDK系统时间域、频率至少20 Hz，
+推荐50–100 Hz。若底盘话题为`/chassis/odom`，检查和启动时都传入该话题。
 2. 启动控制节点：
 
 ```bash
-ros2 launch volleyball_catch_controller catch_controller.launch.py
+ros2 launch volleyball_catch_controller catch_controller.launch.py odom_topic:=/odom
+
+# 底盘使用其他话题时：
+# ros2 launch volleyball_catch_controller catch_controller.launch.py \
+#   odom_topic:=/chassis/odom
 ```
 
 3. 启动 D435i 视觉：
@@ -92,6 +105,10 @@ ros2 run volleyball_catch_controller transport_recovery_test
 
 第二条命令会自动验证DDS deadline、断连、旧NX/同步消息重放以及新epoch恢复。双板部署前
 还应分别运行`ros2_ws/scripts/check_transport.sh nx eth0`和`... rdk eth0`。
+
+`/diagnostics/transport`中的`odom_online`仅表示话题仍在收包；`odom_valid`还要求最近存在
+通过frame、时间戳和单调性检查的样本。`odom_rate_hz`和`odom_rejected`用于现场定位底盘
+里程计频率不足、旧时间戳或坐标系错误。
 
 NX 发送的是 `HybridDepthEstimator` 生成的当前帧混合深度原始观测；RDK 不复用 NX 的
 9D 深度滤波状态，而是在 `odom` 下独立运行接球所需的 Student-t 弹道滤波。

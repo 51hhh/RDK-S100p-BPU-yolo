@@ -135,6 +135,8 @@ RDK将NX图像时间减去该偏差后再查询历史odom。RDK同时检查测�
 
 发布5 Hz通信状态，包括NX、D435、时间同步及odom的在线/超时状态、最后接收年龄、
 接收消息数、DDS deadline miss计数、应用层拒绝数和相机`source_epoch`切换计数。
+其中`odom_valid`表示最近存在通过frame、采集时间和单调性检查的底盘样本，
+`odom_rate_hz`是最近样本时间间隔的中位频率。
 该话题使用Best Effort，只用于诊断，不参与控制判定。
 
 ## CatchState.msg
@@ -174,7 +176,7 @@ uint8 RESET_BALL_LOST=3
 
 | 话题 | 类型 | 发布方 | 说明 |
 |---|---|---|---|
-| `/odom` | `nav_msgs/Odometry` | 底盘 | 高频精准里程计 |
+| `/odom` | `nav_msgs/Odometry` | 舵轮底盘 | 直接使用底盘里程计，当前阶段不融合D435i IMU |
 | `/auto/goal_pose` | `geometry_msgs/PoseStamped` | 控制节点 | `base_link` 下当前接球目标 |
 | `/auto/goal_valid` | `std_msgs/Bool` | 控制节点 | 目标是否可执行 |
 | `/ball/landing` | `geometry_msgs/PointStamped` | 控制节点 | `odom` 下当前选中落点 |

@@ -1,0 +1,13 @@
+std_msgs/Header header
+uint32 frame_id
+int32 class_id
+float32 detection_confidence
+float32[4] bbox_xyxy
+geometry_msgs/Point position
+float64[9] position_covariance
+uint16 valid_depth_samples
+float32 depth_spread_m
+float32 mono_center_z_m
+bool detection_valid
+bool rgbd_valid
+bool mono_valid

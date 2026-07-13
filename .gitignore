@@ -1,1 +1,6 @@
 build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+ros2_ws/install/
+ros2_ws/log/

@@ -2,7 +2,7 @@ catch_controller:
   ros__parameters:
     world_frame: odom
     base_frame: base_link
-    nx_frame: nx_camera_optical_frame
+    nx_frame: nx_left_rectified_optical_frame
     d435_frame: camera_color_optical_frame
     nx_topic: /nx/ball/observation
     d435_topic: /d435/ball/observation

@@ -35,10 +35,10 @@ int64 stereo_timestamp_delta_ns
 
 约定：
 
-- `header.frame_id=nx_camera_optical_frame`。
+- `header.frame_id=nx_left_rectified_optical_frame`，表示按当前双目标定 `R1/P1` 校正后的左目光学坐标系。
 - `position` 必须是未经跨帧 Kalman 的当前帧双目三维观测。
 - NX 只做同帧双目候选选择、一致性检查和反投影，不发布速度或落点。
-- `source_epoch` 在 NX 进程启动时随机生成；`catch_id` 由 RDK 控制节点生成。
+- `source_epoch` 由 NX 观测和时间同步节点共享的 `/run/volleyball/nx_source_epoch` 提供；`catch_id` 由 RDK 控制节点生成。
 - `track_id` 在同一颗球的连续观测期间保持不变；切换目标时必须分配新值。
 - `fallback_observation=true` 或 `stereo_valid=false` 默认不能更新远场控制轨迹。
 

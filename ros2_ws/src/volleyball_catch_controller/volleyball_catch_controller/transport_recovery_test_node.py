@@ -109,7 +109,7 @@ class RecoverySimulator(Node):
     def nx_message(self, stamp):
         message = NxBallObservation()
         message.header.stamp = stamp
-        message.header.frame_id = 'nx_camera_optical_frame'
+        message.header.frame_id = 'nx_left_rectified_optical_frame'
         message.source_epoch = self.epoch
         message.frame_id = self.frame_id
         message.track_id = 1

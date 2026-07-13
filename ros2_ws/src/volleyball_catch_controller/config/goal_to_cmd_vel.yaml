@@ -1,0 +1,17 @@
+goal_to_cmd_vel:
+  ros__parameters:
+    base_frame: base_link
+    goal_topic: /auto/goal_pose
+    goal_valid_topic: /auto/goal_valid
+    state_topic: /catch/state
+    cmd_vel_topic: /vision/cmd_vel
+    publish_rate_hz: 50.0
+    goal_timeout_s: 0.10
+    state_timeout_s: 0.25
+    max_linear_speed_mps: 0.40
+    max_linear_accel_mps2: 0.80
+    stop_radius_m: 0.10
+    braking_margin_s: 0.15
+    minimum_horizon_s: 0.20
+    position_kp: 1.0
+    max_control_dt_s: 0.10

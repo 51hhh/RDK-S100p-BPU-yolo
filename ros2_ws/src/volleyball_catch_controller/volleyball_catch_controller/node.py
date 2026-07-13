@@ -7,6 +7,8 @@ import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped, Vector3Stamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.duration import Duration
+from rclpy.event_handler import SubscriptionEventCallbacks
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -17,7 +19,11 @@ from volleyball_interfaces.msg import (
     D435BallObservation,
     NxBallObservation,
     TimeSyncStatus,
+    TransportDiagnostics,
 )
+
+from .stream_safety import StreamOrderGuard, d435_timing_valid
+from .time_sync import SyncSample, TimeSyncGuard
 
 from .tracking import (
     BallisticTracker,
@@ -82,6 +88,7 @@ class CatchController(Node):
             'nx_topic': '/nx/ball/observation',
             'd435_topic': '/d435/ball/observation',
             'time_sync_topic': '/diagnostics/time_sync',
+            'transport_diagnostics_topic': '/diagnostics/transport',
             'odom_topic': '/odom',
             'event_topic': '/catch/event',
             'goal_topic': '/auto/goal_pose',
@@ -108,8 +115,15 @@ class CatchController(Node):
             'time_sync_warn_offset_s': 0.005,
             'time_sync_reject_offset_s': 0.020,
             'time_sync_max_uncertainty_s': 0.002,
+            'time_sync_max_offset_step_s': 0.002,
             'nx_max_stereo_delta_ns': 1000000,
             'nx_max_depth_sigma_m': 0.75,
+            'd435_max_rgb_depth_delta_ns': 2000000,
+            'd435_max_timestamp_uncertainty_s': 0.002,
+            'nx_deadline_s': 0.050,
+            'd435_deadline_s': 0.040,
+            'time_sync_deadline_s': 0.500,
+            'transport_diagnostics_rate_hz': 5.0,
             'odom_history_s': 3.0,
             'odom_timeout_s': 0.10,
             'max_odom_gap_s': 0.05,
@@ -173,11 +187,30 @@ class CatchController(Node):
         self.pending_time_sync = None
         self.pending_events = []
 
-        sensor_qos = QoSProfile(
+        self.transport = {
+            source: {
+                'messages': 0,
+                'deadline_misses': 0,
+                'rejected': 0,
+                'epoch_changes': 0,
+                'last_receive': 0.0,
+            }
+            for source in ('nx', 'd435', 'time_sync', 'odom')
+        }
+
+        nx_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
+            deadline=Duration(seconds=float(self.p['nx_deadline_s'])),
+        )
+        d435_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            deadline=Duration(seconds=float(self.p['d435_deadline_s'])),
         )
         control_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -190,6 +223,13 @@ class CatchController(Node):
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
+        )
+        time_sync_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            deadline=Duration(seconds=float(self.p['time_sync_deadline_s'])),
         )
         latched_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -204,16 +244,19 @@ class CatchController(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self.create_subscription(
-            NxBallObservation, self.p['nx_topic'], self.on_nx, sensor_qos,
+            NxBallObservation, self.p['nx_topic'], self.on_nx, nx_qos,
             callback_group=self.sensor_group,
+            event_callbacks=self._subscription_events('nx'),
         )
         self.create_subscription(
-            D435BallObservation, self.p['d435_topic'], self.on_d435, sensor_qos,
+            D435BallObservation, self.p['d435_topic'], self.on_d435, d435_qos,
             callback_group=self.sensor_group,
+            event_callbacks=self._subscription_events('d435'),
         )
         self.create_subscription(
-            TimeSyncStatus, self.p['time_sync_topic'], self.on_time_sync, event_qos,
+            TimeSyncStatus, self.p['time_sync_topic'], self.on_time_sync, time_sync_qos,
             callback_group=self.sensor_group,
+            event_callbacks=self._subscription_events('time_sync'),
         )
         self.create_subscription(
             Odometry,
@@ -239,6 +282,9 @@ class CatchController(Node):
             Path, self.p['predicted_path_topic'], diagnostic_qos
         )
         self.state_pub = self.create_publisher(CatchState, self.p['state_topic'], latched_qos)
+        self.transport_pub = self.create_publisher(
+            TransportDiagnostics, self.p['transport_diagnostics_topic'], diagnostic_qos
+        )
 
         common_tracker_args = {
             'gravity_mps2': self.p['gravity_mps2'],
@@ -280,16 +326,17 @@ class CatchController(Node):
         self.d435_confirm = 0
         self.last_nx_receive = 0.0
         self.last_d435_detection = 0.0
-        self.last_nx_stamp = -math.inf
-        self.last_d435_stamp = -math.inf
-        self.last_nx_frame = -1
-        self.last_d435_frame = -1
+        self.nx_order = StreamOrderGuard()
+        self.d435_order = StreamOrderGuard()
         self.last_d435_epoch = 0
-        self.time_sync_epoch = 0
-        self.time_sync_offset_s = math.nan
-        self.time_sync_uncertainty_s = math.inf
-        self.time_sync_receive_s = 0.0
-        self.time_sync_ok = False
+        self.time_sync_guard = TimeSyncGuard(
+            timeout_s=self.p['time_sync_timeout_s'],
+            max_future_skew_s=self.p['max_future_skew_s'],
+            warn_offset_s=self.p['time_sync_warn_offset_s'],
+            reject_offset_s=self.p['time_sync_reject_offset_s'],
+            max_uncertainty_s=self.p['time_sync_max_uncertainty_s'],
+            max_offset_step_s=self.p['time_sync_max_offset_step_s'],
+        )
         self.last_time_sync_warning_s = 0.0
         self.impact_time = 0.0
         self.impact_deadline = 0.0
@@ -317,6 +364,8 @@ class CatchController(Node):
         self.detail = 'startup'
         self.last_state_publish = 0.0
         self.last_diagnostic_publish = 0.0
+        self.last_transport_publish = 0.0
+        self.last_d435_rgbd = 0.0
         self.create_timer(0.01, self.tick, callback_group=self.control_group)
         self.publish_valid(False)
         self.publish_state(force=True)
@@ -340,24 +389,48 @@ class CatchController(Node):
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
+    def _subscription_events(self, source):
+        return SubscriptionEventCallbacks(
+            deadline=lambda event: self._on_deadline_missed(source, event),
+        )
+
+    def _on_deadline_missed(self, source, event):
+        change = max(1, int(getattr(event, 'total_count_change', 1)))
+        with self.pending_lock:
+            self.transport[source]['deadline_misses'] += change
+
+    def _record_receive(self, source):
+        self.transport[source]['messages'] += 1
+        self.transport[source]['last_receive'] = self.now_s()
+
+    def _record_reject(self, source, reason=None):
+        self.transport[source]['rejected'] += 1
+        if reason:
+            self.detail = reason
+
     def message_fresh(self, timestamp, max_age_s):
         age = self.now_s() - timestamp
         return -self.p['max_future_skew_s'] <= age <= max_age_s
 
     def on_time_sync(self, message):
         with self.pending_lock:
+            self._record_receive('time_sync')
             self.pending_time_sync = message
 
     def on_nx(self, message):
         with self.pending_lock:
+            self._record_receive('nx')
             self.pending_nx = message
 
     def on_d435(self, message):
         with self.pending_lock:
+            self._record_receive('d435')
             self.pending_d435 = message
 
     def on_event(self, message):
         with self.pending_lock:
+            if len(self.pending_events) >= 100:
+                self.pending_events.pop(0)
             self.pending_events.append(message)
 
     def _drain_pending(self):
@@ -373,42 +446,58 @@ class CatchController(Node):
         return time_sync, nx_message, d435_message, events
 
     def _process_time_sync(self, message):
-        self.time_sync_epoch = int(message.source_epoch)
-        self.time_sync_offset_s = float(message.offset_ns) * 1e-9
-        self.time_sync_uncertainty_s = float(message.uncertainty_ns) * 1e-9
-        self.time_sync_receive_s = self.now_s()
-        self.time_sync_ok = bool(message.synchronized)
+        receive_time = self.now_s()
+        sample = SyncSample(
+            source_epoch=int(message.source_epoch),
+            sequence=int(message.sequence),
+            sample_time_nx_s=stamp_s(message.header.stamp),
+            offset_s=float(message.offset_ns) * 1e-9,
+            uncertainty_s=float(message.uncertainty_ns) * 1e-9,
+            synchronized=bool(message.synchronized),
+            servo_state=int(message.servo_state),
+            clock_source=str(message.clock_source),
+        )
+        result = self.time_sync_guard.ingest(sample, receive_time)
+        if not result.accepted:
+            self._record_reject('time_sync', result.reason)
+            return
+        if result.clock_step:
+            if self.state != IDLE:
+                self.reset(CatchState.RESET_BALL_LOST, 'NX clock offset stepped')
+            self.nx_order.reset()
         if (
-            abs(self.time_sync_offset_s) > self.p['time_sync_warn_offset_s']
-            and self.time_sync_receive_s - self.last_time_sync_warning_s > 1.0
+            abs(sample.offset_s) > self.p['time_sync_warn_offset_s']
+            and receive_time - self.last_time_sync_warning_s > 1.0
         ):
             self.get_logger().warning(
-                f'NX clock offset is {self.time_sync_offset_s * 1e3:.2f} ms'
+                f'NX clock offset is {sample.offset_s * 1e3:.2f} ms; '
+                f'trust scale={self.time_sync_guard.trust_scale():.2f}'
             )
-            self.last_time_sync_warning_s = self.time_sync_receive_s
+            self.last_time_sync_warning_s = receive_time
 
     def nx_capture_time(self, message):
         timestamp = stamp_s(message.header.stamp)
         if not self.p['require_nx_time_sync']:
             return timestamp
-        now = self.now_s()
-        sync_fresh = now - self.time_sync_receive_s <= self.p['time_sync_timeout_s']
-        sync_matches = self.time_sync_epoch == int(message.source_epoch)
-        offset_valid = (
-            math.isfinite(self.time_sync_offset_s)
-            and abs(self.time_sync_offset_s) <= self.p['time_sync_reject_offset_s']
-            and self.time_sync_uncertainty_s <= self.p['time_sync_max_uncertainty_s']
+        corrected, reason = self.time_sync_guard.corrected_time(
+            timestamp, int(message.source_epoch), self.now_s()
         )
-        if not (self.time_sync_ok and sync_fresh and sync_matches and offset_valid):
-            self.detail = 'NX time synchronization invalid; observation rejected'
+        if corrected is None:
+            self._record_reject('nx', reason)
             return None
-        # offset is defined as NX clock minus RDK clock.
-        return timestamp - self.time_sync_offset_s
+        return corrected
 
     def on_odom(self, message):
         timestamp = stamp_s(message.header.stamp)
-        if timestamp <= 0.0:
-            timestamp = self.now_s()
+        with self.pending_lock:
+            self._record_receive('odom')
+        if (
+            timestamp <= 0.0
+            or message.header.frame_id != self.p['world_frame']
+            or message.child_frame_id != self.p['base_frame']
+            or not self.message_fresh(timestamp, self.p['odom_history_s'])
+        ):
+            return
         position = message.pose.pose.position
         orientation = message.pose.pose.orientation
         quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]
@@ -426,19 +515,6 @@ class CatchController(Node):
         return self.odom.transform_observation(
             position, covariance, timestamp, translation, rotation
         )
-
-    def _ordered_message(self, timestamp, frame_id, source):
-        if source == 'nx':
-            if timestamp <= self.last_nx_stamp or frame_id <= self.last_nx_frame:
-                return False
-            self.last_nx_stamp, self.last_nx_frame = timestamp, frame_id
-        else:
-            if timestamp <= self.last_d435_stamp:
-                return False
-            if frame_id <= self.last_d435_frame and frame_id != 0:
-                return False
-            self.last_d435_stamp, self.last_d435_frame = timestamp, frame_id
-        return True
 
     def _start_cycle(self, message):
         self.state = FAR_NX
@@ -621,9 +697,18 @@ class CatchController(Node):
             and 0.0 <= float(message.depth_sigma_m) <= self.p['nx_max_depth_sigma_m']
         )
         if not valid:
+            self._record_reject('nx')
             return
         if self.state == NEAR_D435:
             return
+
+        previous_epoch = self.nx_order.epoch
+        order = self.nx_order.accept(int(message.source_epoch), timestamp, frame_id)
+        if not order.accepted:
+            self._record_reject('nx', order.reason)
+            return
+        if order.new_epoch and previous_epoch != 0:
+            self.transport['nx']['epoch_changes'] += 1
 
         if self.state == IDLE:
             self._start_cycle(message)
@@ -631,8 +716,6 @@ class CatchController(Node):
             self.reset(CatchState.RESET_BALL_LOST, 'NX source epoch changed')
             self._start_cycle(message)
         elif int(message.track_id) != self.nx_track_id:
-            return
-        if not self._ordered_message(timestamp, frame_id, 'nx'):
             return
 
         self.last_nx_receive = self.now_s()
@@ -654,7 +737,12 @@ class CatchController(Node):
             position,
             covariance_odom,
             timestamp,
-            trust=float(np.clip(message.match_confidence, 0.0, 1.0)),
+            trust=float(np.clip(message.match_confidence, 0.0, 1.0))
+            * (
+                self.time_sync_guard.trust_scale()
+                if self.p['require_nx_time_sync']
+                else 1.0
+            ),
             consistency=1.0,
         ):
             candidate = self._prediction_candidate(
@@ -671,28 +759,37 @@ class CatchController(Node):
         timestamp = stamp_s(message.header.stamp)
         frame_id = int(message.frame_id)
         source_epoch = int(message.source_epoch)
-        if self.last_d435_epoch and source_epoch != self.last_d435_epoch:
+        envelope_valid = (
+            self.message_fresh(timestamp, self.p['d435_max_message_age_s'])
+            and source_epoch != 0
+            and message.header.frame_id == self.p['d435_frame']
+        )
+        if not envelope_valid:
+            self._record_reject('d435', 'D435 message envelope invalid or stale')
+            return
+        previous_epoch = self.d435_order.epoch
+        order = self.d435_order.accept(source_epoch, timestamp, frame_id)
+        if not order.accepted:
+            self._record_reject('d435', order.reason)
+            return
+        if order.new_epoch and previous_epoch != 0:
+            self.transport['d435']['epoch_changes'] += 1
+        if self.last_d435_epoch and order.new_epoch:
             if self.state == NEAR_D435:
                 self.reset(CatchState.RESET_BALL_LOST, 'D435 source epoch changed')
                 return
             self.near_tracker.reset()
             self.near_rgbd_frames = 0
             self.d435_confirm = 0
+            self.last_d435_rgbd = 0.0
             self._reset_prediction_gate(CatchState.SOURCE_D435)
-            self.last_d435_stamp = -math.inf
-            self.last_d435_frame = -1
         self.last_d435_epoch = source_epoch
         detection_valid = (
-            self.message_fresh(timestamp, self.p['d435_max_message_age_s'])
-            and source_epoch != 0
-            and message.header.frame_id == self.p['d435_frame']
-            and int(message.class_id) == self.p['volleyball_class_id']
+            int(message.class_id) == self.p['volleyball_class_id']
             and message.detection_valid
             and message.detection_confidence >= self.p['d435_min_confidence']
             and valid_bbox(message.bbox_xyxy)
         )
-        if not self._ordered_message(timestamp, frame_id, 'd435'):
-            return
         if detection_valid:
             self.last_d435_detection = self.now_s()
             self.d435_confirm += 1
@@ -701,6 +798,15 @@ class CatchController(Node):
             return
 
         if self.state not in (WAIT_D435, NEAR_D435) or not message.rgbd_valid:
+            return
+        if not d435_timing_valid(
+            message.rgb_depth_timestamp_delta_ns,
+            message.timestamp_uncertainty_ns,
+            message.timestamp_mapping_valid,
+            self.p['d435_max_rgb_depth_delta_ns'],
+            int(float(self.p['d435_max_timestamp_uncertainty_s']) * 1e9),
+        ):
+            self._record_reject('d435', 'D435 RGB/depth timing invalid')
             return
         if (
             int(message.valid_depth_samples) <= 0
@@ -730,6 +836,7 @@ class CatchController(Node):
             trust=sample_trust * spread_trust,
             consistency=1.0,
         ):
+            self.last_d435_rgbd = self.now_s()
             self.near_rgbd_frames += 1
             candidate = self._prediction_candidate(
                 self.near_tracker, CatchState.SOURCE_D435, timestamp
@@ -805,6 +912,7 @@ class CatchController(Node):
             CatchState.SOURCE_D435: None,
         }
         self.near_rgbd_frames = 0
+        self.last_d435_rgbd = 0.0
         self.landing_source = 0
         self.distance_to_landing = math.nan
         self.impact_time = 0.0
@@ -838,6 +946,7 @@ class CatchController(Node):
             self._process_d435(d435_message)
 
         now = self.now_s()
+        self.publish_transport_diagnostics(now)
         if (
             self.state != IDLE
             and self.impact_time > 0.0
@@ -857,9 +966,9 @@ class CatchController(Node):
             return
         if (
             self.state == NEAR_D435
-            and now - self.last_d435_detection > self.p['d435_lost_timeout_s']
+            and now - self.last_d435_rgbd > self.p['d435_lost_timeout_s']
         ):
-            self.reset(CatchState.RESET_BALL_LOST, 'D435 ball lost')
+            self.reset(CatchState.RESET_BALL_LOST, 'D435 RGB-D timing/data lost')
             return
 
         odom_pose = self.current_odom()
@@ -965,6 +1074,65 @@ class CatchController(Node):
                 pose.pose.orientation.w = 1.0
                 path.poses.append(pose)
             self.predicted_path_pub.publish(path)
+
+    def publish_transport_diagnostics(self, now):
+        rate = max(0.2, float(self.p['transport_diagnostics_rate_hz']))
+        if now - self.last_transport_publish < 1.0 / rate:
+            return
+        self.last_transport_publish = now
+
+        def age(source):
+            received = self.transport[source]['last_receive']
+            return math.inf if received <= 0.0 else max(0.0, now - received)
+
+        ages = {source: age(source) for source in self.transport}
+        nx_online = ages['nx'] <= max(0.1, 2.0 * float(self.p['nx_deadline_s']))
+        d435_online = ages['d435'] <= max(
+            0.1, 2.0 * float(self.p['d435_deadline_s'])
+        )
+        time_sync_online = ages['time_sync'] <= self.p['time_sync_timeout_s']
+        sync_sample = self.time_sync_guard.sample
+        time_sync_valid = False
+        if sync_sample is not None:
+            time_sync_valid, _ = self.time_sync_guard.status(
+                sync_sample.source_epoch, now
+            )
+        odom_online = ages['odom'] <= self.p['odom_timeout_s']
+        message = TransportDiagnostics()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self.p['world_frame']
+        message.nx_online = nx_online
+        message.d435_online = d435_online
+        message.time_sync_online = time_sync_online
+        message.time_sync_valid = time_sync_valid
+        message.odom_online = odom_online
+        message.nx_receive_age_s = float(ages['nx'])
+        message.d435_receive_age_s = float(ages['d435'])
+        message.time_sync_receive_age_s = float(ages['time_sync'])
+        message.odom_receive_age_s = float(ages['odom'])
+        for source in ('nx', 'd435', 'time_sync', 'odom'):
+            metrics = self.transport[source]
+            setattr(message, f'{source}_messages', metrics['messages'])
+            setattr(message, f'{source}_deadline_misses', metrics['deadline_misses'])
+        message.nx_rejected = self.transport['nx']['rejected']
+        message.d435_rejected = self.transport['d435']['rejected']
+        message.time_sync_rejected = self.transport['time_sync']['rejected']
+        message.nx_epoch_changes = self.transport['nx']['epoch_changes']
+        message.d435_epoch_changes = self.transport['d435']['epoch_changes']
+        offline = [
+            name
+            for name, online in (
+                ('nx', nx_online),
+                ('d435', d435_online),
+                ('time_sync', time_sync_online),
+                ('odom', odom_online),
+            )
+            if not online
+        ]
+        message.detail = 'all monitored links online' if not offline else (
+            'offline/stale: ' + ','.join(offline)
+        )
+        self.transport_pub.publish(message)
 
     def publish_state(self, force=False):
         now = self.now_s()

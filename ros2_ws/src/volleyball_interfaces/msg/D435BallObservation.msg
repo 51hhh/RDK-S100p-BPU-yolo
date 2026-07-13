@@ -1,6 +1,10 @@
 std_msgs/Header header
 uint32 source_epoch
 uint32 frame_id
+int64 rgb_depth_timestamp_delta_ns
+uint64 timestamp_uncertainty_ns
+uint8 timestamp_domain
+bool timestamp_mapping_valid
 int32 class_id
 float32 detection_confidence
 float32[4] bbox_xyxy
@@ -12,3 +16,8 @@ float32 mono_center_z_m
 bool detection_valid
 bool rgbd_valid
 bool mono_valid
+
+uint8 TIMESTAMP_UNKNOWN=0
+uint8 TIMESTAMP_HARDWARE_CLOCK=1
+uint8 TIMESTAMP_SYSTEM_TIME=2
+uint8 TIMESTAMP_GLOBAL_TIME=3

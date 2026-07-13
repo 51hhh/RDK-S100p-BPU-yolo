@@ -1,0 +1,12 @@
+nx_time_sync_publisher:
+  ros__parameters:
+    topic: /diagnostics/time_sync
+    publish_rate_hz: 10.0
+    # Must match NxBallObservation.source_epoch. Prefer the shared epoch file.
+    source_epoch: 0
+    source_epoch_file: /run/volleyball/nx_source_epoch
+    chronyc_executable: chronyc
+    command_timeout_s: 0.20
+    # chronyc System time is NX/local minus its reference (RDK/master).
+    offset_sign: 1.0
+    max_locked_uncertainty_s: 0.002

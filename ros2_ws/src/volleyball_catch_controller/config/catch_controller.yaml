@@ -7,6 +7,7 @@ catch_controller:
     nx_topic: /nx/ball/observation
     d435_topic: /d435/ball/observation
     time_sync_topic: /diagnostics/time_sync
+    transport_diagnostics_topic: /diagnostics/transport
     odom_topic: /odom
     event_topic: /catch/event
     goal_topic: /auto/goal_pose
@@ -28,13 +29,21 @@ catch_controller:
     nx_max_message_age_s: 0.05
     d435_max_message_age_s: 0.05
     max_future_skew_s: 0.02
+    # 独立轨迹仍需将NX采集时间修正到RDK/odom时间域。
     require_nx_time_sync: true
     time_sync_timeout_s: 0.50
     time_sync_warn_offset_s: 0.005
     time_sync_reject_offset_s: 0.020
     time_sync_max_uncertainty_s: 0.002
+    time_sync_max_offset_step_s: 0.002
     nx_max_stereo_delta_ns: 1000000
     nx_max_depth_sigma_m: 0.75
+    d435_max_rgb_depth_delta_ns: 2000000
+    d435_max_timestamp_uncertainty_s: 0.002
+    nx_deadline_s: 0.050
+    d435_deadline_s: 0.040
+    time_sync_deadline_s: 0.500
+    transport_diagnostics_rate_hz: 5.0
     odom_history_s: 3.0
     odom_timeout_s: 0.10
     max_odom_gap_s: 0.05

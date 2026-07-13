@@ -55,7 +55,8 @@ D435ObservationPublisher::D435ObservationPublisher(bool enabled,
         impl_->node = std::make_shared<rclcpp::Node>("d435_ball_vision");
         const auto qos = rclcpp::QoS(rclcpp::KeepLast(1))
                              .best_effort()
-                             .durability_volatile();
+                             .durability_volatile()
+                             .deadline(rclcpp::Duration::from_seconds(0.04));
         impl_->publisher =
             impl_->node->create_publisher<volleyball_interfaces::msg::D435BallObservation>(
                 topic, qos);
@@ -83,11 +84,12 @@ bool D435ObservationPublisher::available() const
 void D435ObservationPublisher::publish(
     const std::vector<Detection>& detections,
     const std::vector<DistanceMeasurement>& measurements,
-    double capture_timestamp_s,
+    const RgbdTiming& timing,
     uint32_t frame_id)
 {
 #ifdef HAVE_VOLLEYBALL_ROS2
-    if (!available() || !std::isfinite(capture_timestamp_s) || capture_timestamp_s <= 0.0) {
+    if (!available() || !std::isfinite(timing.color_capture_timestamp_s) ||
+        timing.color_capture_timestamp_s <= 0.0) {
         return;
     }
 
@@ -103,13 +105,18 @@ void D435ObservationPublisher::publish(
     }
 
     volleyball_interfaces::msg::D435BallObservation message;
-    const int64_t timestamp_ns = static_cast<int64_t>(capture_timestamp_s * 1e9);
+    const int64_t timestamp_ns = static_cast<int64_t>(
+        timing.color_capture_timestamp_s * 1e9);
     message.header.stamp.sec = static_cast<int32_t>(timestamp_ns / 1000000000LL);
     message.header.stamp.nanosec =
         static_cast<uint32_t>(timestamp_ns % 1000000000LL);
     message.header.frame_id = "camera_color_optical_frame";
     message.source_epoch = impl_->source_epoch;
     message.frame_id = frame_id;
+    message.rgb_depth_timestamp_delta_ns = timing.rgb_depth_delta_ns;
+    message.timestamp_uncertainty_ns = timing.timestamp_uncertainty_ns;
+    message.timestamp_domain = static_cast<uint8_t>(timing.timestamp_domain);
+    message.timestamp_mapping_valid = timing.timestamp_mapping_valid;
     message.class_id = impl_->class_id;
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -168,7 +175,7 @@ void D435ObservationPublisher::publish(
 #else
     (void)detections;
     (void)measurements;
-    (void)capture_timestamp_s;
+    (void)timing;
     (void)frame_id;
 #endif
 }

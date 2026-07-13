@@ -152,6 +152,12 @@ DEFINE_bool(landing_allow_fallback, false, "是否允许单目/预测观测发�
 DEFINE_bool(d435_observation_publish, true, "发布D435i球观测给独立控制节点");
 DEFINE_string(d435_observation_topic, "/d435/ball/observation", "D435i球观测话题");
 DEFINE_int32(volleyball_class_id, 0, "排球类别ID");
+DEFINE_bool(depth_allow_hardware_time_fallback, false,
+            "允许D435硬件时钟软件映射；实车默认要求global/system time");
+DEFINE_int32(depth_timestamp_fallback_warmup_frames, 30,
+             "D435硬件时钟映射稳定前的最少帧数");
+DEFINE_double(depth_max_timestamp_uncertainty_s, 0.002,
+              "D435硬件时钟映射最大不确定度");
 
 namespace fs = std::filesystem;
 
@@ -252,6 +258,15 @@ bool load_runtime_config(const std::string& path)
                          FLAGS_depth_draw_samples);
         apply_yaml_value(depth, "show_colormap", "depth_show_colormap",
                          FLAGS_depth_show_colormap);
+        apply_yaml_value(depth, "allow_hardware_time_fallback",
+                         "depth_allow_hardware_time_fallback",
+                         FLAGS_depth_allow_hardware_time_fallback);
+        apply_yaml_value(depth, "timestamp_fallback_warmup_frames",
+                         "depth_timestamp_fallback_warmup_frames",
+                         FLAGS_depth_timestamp_fallback_warmup_frames);
+        apply_yaml_value(depth, "max_timestamp_uncertainty_s",
+                         "depth_max_timestamp_uncertainty_s",
+                         FLAGS_depth_max_timestamp_uncertainty_s);
 
         apply_yaml_value(display, "enabled", "display", FLAGS_display);
         apply_yaml_value(display, "fullscreen", "fullscreen", FLAGS_fullscreen);
@@ -355,6 +370,11 @@ bool validate_runtime_config()
         FLAGS_depth_mono_consistency_relative <= 0.0 ||
         FLAGS_depth_mono_consistency_absolute_m <= 0.0) {
         std::cerr << "[ERROR] depth多点采样参数配置无效" << std::endl;
+        ok = false;
+    }
+    if (FLAGS_depth_timestamp_fallback_warmup_frames < 1 ||
+        FLAGS_depth_max_timestamp_uncertainty_s < 0.0) {
+        std::cerr << "[ERROR] D435时间映射参数配置无效" << std::endl;
         ok = false;
     }
     if (FLAGS_camera_power_line_frequency < 0 ||
@@ -730,6 +750,12 @@ int main(int argc, char **argv)
         capture_config.spatial_filter = FLAGS_depth_spatial_filter;
         capture_config.temporal_filter = FLAGS_depth_temporal_filter;
         capture_config.hole_filling_filter = FLAGS_depth_hole_filling_filter;
+        capture_config.allow_hardware_time_fallback =
+            FLAGS_depth_allow_hardware_time_fallback;
+        capture_config.timestamp_fallback_warmup_frames =
+            FLAGS_depth_timestamp_fallback_warmup_frames;
+        capture_config.max_timestamp_uncertainty_s =
+            FLAGS_depth_max_timestamp_uncertainty_s;
 
         rgbd_capture = std::make_unique<RealSenseRgbdCapture>();
         std::string error;
@@ -1019,9 +1045,13 @@ int main(int argc, char **argv)
         // after frame acquisition; do not publish steady_clock timestamps.
         double capture_timestamp_s = std::chrono::duration<double>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+        RgbdTiming observation_timing;
+        observation_timing.color_capture_timestamp_s = capture_timestamp_s;
+        observation_timing.depth_capture_timestamp_s = capture_timestamp_s;
 #ifdef HAVE_REALSENSE2
         if (use_rgbd && rgbd_frame.capture_timestamp_s > 0.0) {
             capture_timestamp_s = rgbd_frame.capture_timestamp_s;
+            observation_timing = rgbd_frame.timing;
         }
 #endif
         auto capture_end = std::chrono::high_resolution_clock::now();
@@ -1079,7 +1109,7 @@ int main(int argc, char **argv)
         // Vision node always publishes sensor observations, independently of
         // any local diagnostic tracker. Control selection belongs exclusively
         // to catch_controller.
-        d435_publisher.publish(results, distance_measurements, capture_timestamp_s,
+        d435_publisher.publish(results, distance_measurements, observation_timing,
                                static_cast<uint32_t>(frame_count));
         auto draw_end = std::chrono::high_resolution_clock::now();
         double draw_ms = std::chrono::duration<double, std::milli>(draw_end - draw_start).count();

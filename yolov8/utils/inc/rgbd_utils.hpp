@@ -71,6 +71,22 @@ struct DistanceMeasurement {
     std::vector<cv::Point> accepted_pixels;
 };
 
+enum class RgbdTimestampDomain : uint8_t {
+    Unknown = 0,
+    HardwareClock = 1,
+    SystemTime = 2,
+    GlobalTime = 3,
+};
+
+struct RgbdTiming {
+    double color_capture_timestamp_s{0.0};
+    double depth_capture_timestamp_s{0.0};
+    int64_t rgb_depth_delta_ns{0};
+    uint64_t timestamp_uncertainty_ns{0};
+    RgbdTimestampDomain timestamp_domain{RgbdTimestampDomain::Unknown};
+    bool timestamp_mapping_valid{false};
+};
+
 class SphereDistanceEstimator {
 public:
     explicit SphereDistanceEstimator(SphereDepthConfig config = {});
@@ -115,6 +131,9 @@ struct RealSenseCaptureConfig {
     bool spatial_filter{true};
     bool temporal_filter{false};
     bool hole_filling_filter{false};
+    bool allow_hardware_time_fallback{false};
+    int timestamp_fallback_warmup_frames{30};
+    double max_timestamp_uncertainty_s{0.002};
 };
 
 struct RgbdFrame {
@@ -123,6 +142,7 @@ struct RgbdFrame {
     CameraModel camera;
     DepthImageView depth_view;
     double capture_timestamp_s{0.0};
+    RgbdTiming timing;
 };
 
 class RealSenseRgbdCapture {
@@ -146,8 +166,12 @@ private:
     bool use_spatial_filter_{true};
     bool use_temporal_filter_{false};
     bool use_hole_filling_filter_{false};
+    bool allow_hardware_time_fallback_{false};
+    int timestamp_fallback_warmup_frames_{30};
+    double max_timestamp_uncertainty_s_{0.002};
     bool started_{false};
     std::optional<double> device_to_system_offset_s_;
+    int device_timestamp_samples_{0};
 };
 
 #endif  // HAVE_REALSENSE2

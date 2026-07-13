@@ -12,7 +12,7 @@ public:
     bool available() const;
     void publish(const std::vector<Detection>& detections,
                  const std::vector<DistanceMeasurement>& measurements,
-                 double capture_timestamp_s, uint32_t frame_id);
+                 const RgbdTiming& timing, uint32_t frame_id);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

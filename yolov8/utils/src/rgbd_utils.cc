@@ -467,6 +467,11 @@ bool RealSenseRgbdCapture::start(const RealSenseCaptureConfig& config,
         use_spatial_filter_ = config.spatial_filter;
         use_temporal_filter_ = config.temporal_filter;
         use_hole_filling_filter_ = config.hole_filling_filter;
+        allow_hardware_time_fallback_ = config.allow_hardware_time_fallback;
+        timestamp_fallback_warmup_frames_ =
+            std::max(1, config.timestamp_fallback_warmup_frames);
+        max_timestamp_uncertainty_s_ =
+            std::max(0.0, config.max_timestamp_uncertainty_s);
         if (!configureColorSensor(config, error)) {
             pipeline_.stop();
             return false;
@@ -521,29 +526,92 @@ bool RealSenseRgbdCapture::read(RgbdFrame& output, std::string* error)
     try {
         rs2::frameset frames = pipeline_.wait_for_frames();
         const rs2::video_frame captured_color = frames.get_color_frame();
-        if (!captured_color) {
-            if (error) *error = "RealSense color frame is missing";
+        const rs2::depth_frame captured_depth = frames.get_depth_frame();
+        if (!captured_color || !captured_depth) {
+            if (error) *error = "RealSense color/depth frame is missing";
             return false;
         }
-        const double device_timestamp_s = captured_color.get_timestamp() * 1e-3;
-        const auto timestamp_domain = captured_color.get_frame_timestamp_domain();
+        const double color_device_timestamp_s = captured_color.get_timestamp() * 1e-3;
+        const double depth_device_timestamp_s = captured_depth.get_timestamp() * 1e-3;
+        const auto color_domain = captured_color.get_frame_timestamp_domain();
+        const auto depth_domain = captured_depth.get_frame_timestamp_domain();
         const double system_now_s = std::chrono::duration<double>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        if (timestamp_domain == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME ||
-            timestamp_domain == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME) {
-            output.capture_timestamp_s = device_timestamp_s;
-        } else {
-            const double observed_offset = system_now_s - device_timestamp_s;
+        output.timing = {};
+        const bool color_is_system =
+            color_domain == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME ||
+            color_domain == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME;
+        const bool depth_is_system =
+            depth_domain == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME ||
+            depth_domain == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME;
+        if (color_is_system && depth_is_system) {
+            output.timing.color_capture_timestamp_s = color_device_timestamp_s;
+            output.timing.depth_capture_timestamp_s = depth_device_timestamp_s;
+            output.timing.timestamp_domain =
+                color_domain == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME &&
+                        depth_domain == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME
+                    ? RgbdTimestampDomain::GlobalTime
+                    : RgbdTimestampDomain::SystemTime;
+            output.timing.timestamp_uncertainty_ns = 100000;
+            output.timing.timestamp_mapping_valid = true;
+        } else if (!color_is_system && !depth_is_system &&
+                   color_domain == depth_domain) {
+            const double newest_device_timestamp_s =
+                std::max(color_device_timestamp_s, depth_device_timestamp_s);
+            const double observed_offset = system_now_s - newest_device_timestamp_s;
             if (!device_to_system_offset_s_) {
                 device_to_system_offset_s_ = observed_offset;
+                device_timestamp_samples_ = 1;
             } else {
-                // Track slow clock drift without following per-frame queueing jitter.
-                *device_to_system_offset_s_ =
-                    0.995 * *device_to_system_offset_s_ + 0.005 * observed_offset;
+                // A lower observed offset is a better low-queue-delay sample.
+                // Follow increases slowly so clock drift is tracked without
+                // treating USB/driver queueing as clock offset.
+                if (observed_offset < *device_to_system_offset_s_) {
+                    *device_to_system_offset_s_ = observed_offset;
+                } else {
+                    *device_to_system_offset_s_ +=
+                        0.001 * (observed_offset - *device_to_system_offset_s_);
+                }
+                ++device_timestamp_samples_;
             }
-            output.capture_timestamp_s =
-                device_timestamp_s + *device_to_system_offset_s_;
+            output.timing.color_capture_timestamp_s =
+                color_device_timestamp_s + *device_to_system_offset_s_;
+            output.timing.depth_capture_timestamp_s =
+                depth_device_timestamp_s + *device_to_system_offset_s_;
+            output.timing.timestamp_domain = RgbdTimestampDomain::HardwareClock;
+            const double residual_s =
+                std::max(0.0, observed_offset - *device_to_system_offset_s_);
+            output.timing.timestamp_uncertainty_ns = static_cast<uint64_t>(
+                std::ceil(std::max(0.0005, residual_s) * 1e9));
+            output.timing.timestamp_mapping_valid =
+                allow_hardware_time_fallback_ &&
+                device_timestamp_samples_ >= timestamp_fallback_warmup_frames_ &&
+                residual_s <= max_timestamp_uncertainty_s_;
+        } else {
+            // Mixed timestamp domains cannot prove RGB/depth simultaneity.
+            // Keep the color header in the system epoch when possible, but
+            // mark the mapping invalid so the controller cannot use RGB-D.
+            const double hardware_timestamp_s = color_is_system
+                ? depth_device_timestamp_s : color_device_timestamp_s;
+            const double observed_offset = system_now_s - hardware_timestamp_s;
+            if (!device_to_system_offset_s_ ||
+                observed_offset < *device_to_system_offset_s_) {
+                device_to_system_offset_s_ = observed_offset;
+            }
+            output.timing.color_capture_timestamp_s = color_is_system
+                ? color_device_timestamp_s
+                : color_device_timestamp_s + *device_to_system_offset_s_;
+            output.timing.depth_capture_timestamp_s = depth_is_system
+                ? depth_device_timestamp_s
+                : depth_device_timestamp_s + *device_to_system_offset_s_;
+            output.timing.timestamp_domain = RgbdTimestampDomain::Unknown;
+            output.timing.timestamp_uncertainty_ns = 0xFFFFFFFFFFFFFFFFULL;
+            output.timing.timestamp_mapping_valid = false;
         }
+        output.timing.rgb_depth_delta_ns = static_cast<int64_t>(std::llround(
+            (output.timing.depth_capture_timestamp_s -
+             output.timing.color_capture_timestamp_s) * 1e9));
+        output.capture_timestamp_s = output.timing.color_capture_timestamp_s;
         frames = align_to_color_.process(frames);
         rs2::video_frame color = frames.get_color_frame();
         rs2::depth_frame depth = frames.get_depth_frame();
@@ -579,6 +647,7 @@ void RealSenseRgbdCapture::stop()
     pipeline_.stop();
     started_ = false;
     device_to_system_offset_s_.reset();
+    device_timestamp_samples_ = 0;
 }
 
 #endif  // HAVE_REALSENSE2

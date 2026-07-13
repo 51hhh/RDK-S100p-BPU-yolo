@@ -51,6 +51,12 @@ depth:
   spatial_filter: true
   temporal_filter: false         # Avoid motion trails on a fast volleyball
   hole_filling_filter: false     # Robust multi-point sampling handles holes
+  # Real vehicle mode accepts only librealsense global/system timestamps.
+  # Hardware-clock mapping remains available for diagnostics, but is inhibited
+  # until explicitly enabled and stable for the configured number of frames.
+  allow_hardware_time_fallback: false
+  timestamp_fallback_warmup_frames: 30
+  max_timestamp_uncertainty_s: 0.002
   draw_samples: true
   show_colormap: false
 

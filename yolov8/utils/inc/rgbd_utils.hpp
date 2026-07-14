@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -111,6 +113,15 @@ cv::Mat colorizeDepth(const DepthImageView& depth,
                       float min_depth_m,
                       float max_depth_m);
 
+struct D435ImuSample {
+    cv::Vec3d angular_velocity{0.0, 0.0, 0.0};
+    cv::Vec3d linear_acceleration{0.0, 0.0, 0.0};
+    double gyro_timestamp_s{0.0};
+    double accel_timestamp_s{0.0};
+    bool gyro_valid{false};
+    bool accel_valid{false};
+};
+
 #ifdef HAVE_REALSENSE2
 
 #include <librealsense2/rs.hpp>
@@ -134,6 +145,10 @@ struct RealSenseCaptureConfig {
     bool allow_hardware_time_fallback{false};
     int timestamp_fallback_warmup_frames{30};
     double max_timestamp_uncertainty_s{0.002};
+    bool imu_enabled{true};
+    int gyro_fps{200};
+    int accel_fps{63};
+    std::function<void(const D435ImuSample&)> imu_callback;
 };
 
 struct RgbdFrame {
@@ -155,9 +170,14 @@ public:
 private:
     bool configureColorSensor(const RealSenseCaptureConfig& config,
                               std::string* error);
+    bool startMotionSensor(const RealSenseCaptureConfig& config,
+                           std::string* error);
+    void onMotionFrame(const rs2::frame& frame);
+    double motionTimestampS(const rs2::frame& frame);
 
     rs2::pipeline pipeline_;
     rs2::pipeline_profile profile_;
+    std::optional<rs2::sensor> motion_sensor_;
     rs2::align align_to_color_{RS2_STREAM_COLOR};
     rs2::spatial_filter spatial_filter_;
     rs2::temporal_filter temporal_filter_;
@@ -172,6 +192,10 @@ private:
     bool started_{false};
     std::optional<double> device_to_system_offset_s_;
     int device_timestamp_samples_{0};
+    std::mutex motion_mutex_;
+    D435ImuSample latest_imu_;
+    std::optional<double> motion_device_to_system_offset_s_;
+    std::function<void(const D435ImuSample&)> imu_callback_;
 };
 
 #endif  // HAVE_REALSENSE2

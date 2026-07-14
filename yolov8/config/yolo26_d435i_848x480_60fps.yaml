@@ -127,3 +127,14 @@ d435_observation:
   enabled: true
   topic: "/d435/ball/observation"
   volleyball_class_id: 0
+
+d435_imu:
+  # Publish from the same librealsense device process as RGB-D. Do not launch a
+  # second realsense2_camera process for this D435i at the same time.
+  enabled: true
+  topic: "/camera/camera/imu"
+  frame_id: "camera_imu_optical_frame"
+  gyro_fps: 200
+  accel_fps: 63
+  gyro_stddev: 0.02
+  accel_stddev: 0.20

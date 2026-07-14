@@ -152,6 +152,13 @@ DEFINE_bool(landing_allow_fallback, false, "是否允许单目/预测观测发�
 DEFINE_bool(d435_observation_publish, true, "发布D435i球观测给独立控制节点");
 DEFINE_string(d435_observation_topic, "/d435/ball/observation", "D435i球观测话题");
 DEFINE_int32(volleyball_class_id, 0, "排球类别ID");
+DEFINE_bool(d435_imu_publish, false, "由视觉进程发布D435i陀螺仪和加速度计");
+DEFINE_string(d435_imu_topic, "/camera/camera/imu", "D435i IMU话题");
+DEFINE_string(d435_imu_frame_id, "camera_imu_optical_frame", "D435i IMU坐标系");
+DEFINE_int32(d435_imu_gyro_fps, 200, "D435i陀螺仪采样率");
+DEFINE_int32(d435_imu_accel_fps, 63, "D435i加速度计采样率");
+DEFINE_double(d435_imu_gyro_stddev, 0.02, "D435i角速度标准差(rad/s)");
+DEFINE_double(d435_imu_accel_stddev, 0.20, "D435i线加速度标准差(m/s^2)");
 DEFINE_bool(depth_allow_hardware_time_fallback, false,
             "允许D435硬件时钟软件映射；实车默认要求global/system time");
 DEFINE_int32(depth_timestamp_fallback_warmup_frames, 30,
@@ -194,6 +201,7 @@ bool load_runtime_config(const std::string& path)
         YAML::Node ground = root["ground"];
         YAML::Node landing = root["landing_publish"];
         YAML::Node d435_observation = root["d435_observation"];
+        YAML::Node d435_imu = root["d435_imu"];
 
         apply_yaml_value(camera, "device", "video_device", FLAGS_video_device);
         apply_yaml_value(camera, "width", "camera_width", FLAGS_camera_width);
@@ -322,6 +330,13 @@ bool load_runtime_config(const std::string& path)
         apply_yaml_value(d435_observation, "enabled", "d435_observation_publish", FLAGS_d435_observation_publish);
         apply_yaml_value(d435_observation, "topic", "d435_observation_topic", FLAGS_d435_observation_topic);
         apply_yaml_value(d435_observation, "volleyball_class_id", "volleyball_class_id", FLAGS_volleyball_class_id);
+        apply_yaml_value(d435_imu, "enabled", "d435_imu_publish", FLAGS_d435_imu_publish);
+        apply_yaml_value(d435_imu, "topic", "d435_imu_topic", FLAGS_d435_imu_topic);
+        apply_yaml_value(d435_imu, "frame_id", "d435_imu_frame_id", FLAGS_d435_imu_frame_id);
+        apply_yaml_value(d435_imu, "gyro_fps", "d435_imu_gyro_fps", FLAGS_d435_imu_gyro_fps);
+        apply_yaml_value(d435_imu, "accel_fps", "d435_imu_accel_fps", FLAGS_d435_imu_accel_fps);
+        apply_yaml_value(d435_imu, "gyro_stddev", "d435_imu_gyro_stddev", FLAGS_d435_imu_gyro_stddev);
+        apply_yaml_value(d435_imu, "accel_stddev", "d435_imu_accel_stddev", FLAGS_d435_imu_accel_stddev);
 
         std::cout << "[INFO] 已加载配置文件: " << path << std::endl;
         return true;
@@ -375,6 +390,14 @@ bool validate_runtime_config()
     if (FLAGS_depth_timestamp_fallback_warmup_frames < 1 ||
         FLAGS_depth_max_timestamp_uncertainty_s < 0.0) {
         std::cerr << "[ERROR] D435时间映射参数配置无效" << std::endl;
+        ok = false;
+    }
+    if (FLAGS_d435_imu_publish &&
+        (!FLAGS_depth_enabled || FLAGS_d435_imu_gyro_fps <= 0 ||
+         FLAGS_d435_imu_accel_fps <= 0 || FLAGS_d435_imu_gyro_stddev < 0.0 ||
+         FLAGS_d435_imu_accel_stddev < 0.0 || FLAGS_d435_imu_topic.empty() ||
+         FLAGS_d435_imu_frame_id.empty())) {
+        std::cerr << "[ERROR] D435i IMU发布要求RGB-D模式和有效的IMU参数" << std::endl;
         ok = false;
     }
     if (FLAGS_camera_power_line_frequency < 0 ||
@@ -724,6 +747,14 @@ int main(int argc, char **argv)
     int actual_camera_width = FLAGS_camera_width;
     int actual_camera_height = FLAGS_camera_height;
     double actual_camera_fps = FLAGS_camera_fps;
+    D435ObservationPublisher d435_publisher(FLAGS_d435_observation_publish,
+                                             FLAGS_d435_observation_topic,
+                                             FLAGS_volleyball_class_id,
+                                             FLAGS_d435_imu_publish,
+                                             FLAGS_d435_imu_topic,
+                                             FLAGS_d435_imu_frame_id,
+                                             FLAGS_d435_imu_gyro_stddev,
+                                             FLAGS_d435_imu_accel_stddev);
 
 #ifdef HAVE_REALSENSE2
     std::unique_ptr<RealSenseRgbdCapture> rgbd_capture;
@@ -756,6 +787,12 @@ int main(int argc, char **argv)
             FLAGS_depth_timestamp_fallback_warmup_frames;
         capture_config.max_timestamp_uncertainty_s =
             FLAGS_depth_max_timestamp_uncertainty_s;
+        capture_config.imu_enabled = FLAGS_d435_imu_publish;
+        capture_config.gyro_fps = FLAGS_d435_imu_gyro_fps;
+        capture_config.accel_fps = FLAGS_d435_imu_accel_fps;
+        capture_config.imu_callback = [&d435_publisher](const D435ImuSample& sample) {
+            d435_publisher.publishImu(sample);
+        };
 
         rgbd_capture = std::make_unique<RealSenseRgbdCapture>();
         std::string error;
@@ -905,10 +942,6 @@ int main(int argc, char **argv)
                                                static_cast<float>(FLAGS_ground_normal_y),
                                                static_cast<float>(FLAGS_ground_normal_z)},
                                               FLAGS_ground_offset_m);
-    D435ObservationPublisher d435_publisher(FLAGS_d435_observation_publish,
-                                             FLAGS_d435_observation_topic,
-                                             FLAGS_volleyball_class_id);
-
     if (FLAGS_camera_warmup_frames > 0) {
         std::cout << "[INFO] 摄像头预热，丢弃 " << FLAGS_camera_warmup_frames
                   << " 帧..." << std::endl;

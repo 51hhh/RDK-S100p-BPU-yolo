@@ -122,8 +122,8 @@ RDK S100P + D435i + YOLO26 的完整 RGB-D 启动、配置、可视化和深度�
 - [RGB-D 使用说明](docs/RGBD_USAGE.md)
 - [远近场接球系统 Wiki](wiki/Home.md)
 
-RDK ROS2 接口包和独立控制节点位于 `ros2_ws/src/`。视觉节点只发布
-`/d435/ball/observation`，控制节点是 `/auto/goal_pose` 的唯一发布者。
+RDK ROS2 接口包和独立控制节点位于 `ros2_ws/src/`。D435i视觉进程发布
+`/d435/ball/observation`和`/camera/camera/imu`，控制节点是`/auto/goal_pose`的唯一发布者。
 
 ### 1. 克隆仓库
 

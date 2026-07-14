@@ -26,6 +26,7 @@ find_package(Threads REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(realsense2 QUIET)
 find_package(rclcpp QUIET)
+find_package(sensor_msgs QUIET)
 find_package(volleyball_interfaces QUIET)
 set(ROS2_LINK_LIBS "")
 
@@ -35,13 +36,17 @@ if(TARGET realsense2::realsense2)
 elseif(realsense2_FOUND AND realsense2_LIBRARY)
     set(REALSENSE_LINK_LIBS ${realsense2_LIBRARY})
 endif()
-if(rclcpp_FOUND AND volleyball_interfaces_FOUND AND
+if(rclcpp_FOUND AND sensor_msgs_FOUND AND volleyball_interfaces_FOUND AND
+   TARGET sensor_msgs::sensor_msgs__rosidl_typesupport_cpp AND
    TARGET volleyball_interfaces::volleyball_interfaces__rosidl_typesupport_cpp)
     add_compile_definitions(HAVE_VOLLEYBALL_ROS2=1)
-    list(APPEND ROS2_LINK_LIBS rclcpp::rclcpp volleyball_interfaces::volleyball_interfaces__rosidl_typesupport_cpp)
-    message(STATUS "D435 volleyball observation publisher: enabled")
+    list(APPEND ROS2_LINK_LIBS
+         rclcpp::rclcpp
+         sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
+         volleyball_interfaces::volleyball_interfaces__rosidl_typesupport_cpp)
+    message(STATUS "D435 observation and IMU publishers: enabled")
 else()
-    message(STATUS "D435 volleyball observation publisher: disabled")
+    message(STATUS "D435 observation and IMU publishers: disabled")
 endif()
 
 if(NOT REALSENSE_LINK_LIBS)

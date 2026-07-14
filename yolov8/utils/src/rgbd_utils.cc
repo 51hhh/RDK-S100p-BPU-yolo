@@ -476,6 +476,10 @@ bool RealSenseRgbdCapture::start(const RealSenseCaptureConfig& config,
             pipeline_.stop();
             return false;
         }
+        if (config.imu_enabled && !startMotionSensor(config, error)) {
+            pipeline_.stop();
+            return false;
+        }
         started_ = true;
         return true;
     } catch (const rs2::error& exception) {
@@ -515,6 +519,108 @@ bool RealSenseRgbdCapture::configureColorSensor(const RealSenseCaptureConfig& co
     }
     if (error) *error = "RealSense color sensor not found";
     return false;
+}
+
+bool RealSenseRgbdCapture::startMotionSensor(
+    const RealSenseCaptureConfig& config, std::string* error)
+{
+    try {
+        imu_callback_ = config.imu_callback;
+        for (auto sensor : profile_.get_device().query_sensors()) {
+            std::optional<rs2::stream_profile> gyro_profile;
+            std::optional<rs2::stream_profile> accel_profile;
+            int gyro_delta = std::numeric_limits<int>::max();
+            int accel_delta = std::numeric_limits<int>::max();
+            for (const auto& stream : sensor.get_stream_profiles()) {
+                if (stream.format() != RS2_FORMAT_MOTION_XYZ32F) continue;
+                if (stream.stream_type() == RS2_STREAM_GYRO) {
+                    const int delta = std::abs(stream.fps() - config.gyro_fps);
+                    if (delta < gyro_delta) {
+                        gyro_profile = stream;
+                        gyro_delta = delta;
+                    }
+                } else if (stream.stream_type() == RS2_STREAM_ACCEL) {
+                    const int delta = std::abs(stream.fps() - config.accel_fps);
+                    if (delta < accel_delta) {
+                        accel_profile = stream;
+                        accel_delta = delta;
+                    }
+                }
+            }
+            if (!gyro_profile || !accel_profile) continue;
+            if (sensor.supports(RS2_OPTION_GLOBAL_TIME_ENABLED)) {
+                try {
+                    sensor.set_option(RS2_OPTION_GLOBAL_TIME_ENABLED, 1.0f);
+                } catch (const rs2::error&) {
+                    // Hardware-clock timestamps are mapped below when required.
+                }
+            }
+            std::vector<rs2::stream_profile> profiles{
+                *gyro_profile, *accel_profile
+            };
+            sensor.open(profiles);
+            sensor.start([this](rs2::frame frame) { onMotionFrame(frame); });
+            motion_sensor_ = sensor;
+            return true;
+        }
+        if (error) *error = "D435i gyro/accelerometer motion sensor not found";
+        return false;
+    } catch (const rs2::error& exception) {
+        if (error) *error = std::string("D435i IMU start failed: ") + exception.what();
+        motion_sensor_.reset();
+        return false;
+    }
+}
+
+double RealSenseRgbdCapture::motionTimestampS(const rs2::frame& frame)
+{
+    const double device_timestamp_s = frame.get_timestamp() * 1e-3;
+    const auto domain = frame.get_frame_timestamp_domain();
+    if (domain == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME ||
+        domain == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME) {
+        return device_timestamp_s;
+    }
+    const double system_now_s = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const double observed_offset = system_now_s - device_timestamp_s;
+    if (!motion_device_to_system_offset_s_ ||
+        observed_offset < *motion_device_to_system_offset_s_) {
+        motion_device_to_system_offset_s_ = observed_offset;
+    } else {
+        *motion_device_to_system_offset_s_ +=
+            0.001 * (observed_offset - *motion_device_to_system_offset_s_);
+    }
+    return device_timestamp_s + *motion_device_to_system_offset_s_;
+}
+
+void RealSenseRgbdCapture::onMotionFrame(const rs2::frame& frame)
+{
+    const rs2::motion_frame motion = frame.as<rs2::motion_frame>();
+    if (!motion) return;
+    const rs2_vector data = motion.get_motion_data();
+    D435ImuSample publish_sample;
+    bool should_publish = false;
+    {
+        std::lock_guard<std::mutex> lock(motion_mutex_);
+        const double timestamp_s = motionTimestampS(frame);
+        const auto stream = frame.get_profile().stream_type();
+        if (stream == RS2_STREAM_GYRO) {
+            latest_imu_.angular_velocity = {data.x, data.y, data.z};
+            latest_imu_.gyro_timestamp_s = timestamp_s;
+            latest_imu_.gyro_valid = true;
+            if (latest_imu_.accel_valid) {
+                publish_sample = latest_imu_;
+                should_publish = true;
+            }
+        } else if (stream == RS2_STREAM_ACCEL) {
+            latest_imu_.linear_acceleration = {data.x, data.y, data.z};
+            latest_imu_.accel_timestamp_s = timestamp_s;
+            latest_imu_.accel_valid = true;
+        }
+    }
+    if (should_publish && imu_callback_) {
+        imu_callback_(publish_sample);
+    }
 }
 
 bool RealSenseRgbdCapture::read(RgbdFrame& output, std::string* error)
@@ -644,10 +750,25 @@ bool RealSenseRgbdCapture::read(RgbdFrame& output, std::string* error)
 void RealSenseRgbdCapture::stop()
 {
     if (!started_) return;
+    if (motion_sensor_) {
+        try {
+            motion_sensor_->stop();
+            motion_sensor_->close();
+        } catch (const rs2::error&) {
+            // Continue stopping the video pipeline even if the IMU is gone.
+        }
+        motion_sensor_.reset();
+    }
     pipeline_.stop();
     started_ = false;
     device_to_system_offset_s_.reset();
     device_timestamp_samples_ = 0;
+    motion_device_to_system_offset_s_.reset();
+    imu_callback_ = {};
+    {
+        std::lock_guard<std::mutex> lock(motion_mutex_);
+        latest_imu_ = {};
+    }
 }
 
 #endif  // HAVE_REALSENSE2

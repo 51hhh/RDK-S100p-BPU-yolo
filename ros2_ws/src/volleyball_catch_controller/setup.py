@@ -9,6 +9,8 @@ setup(
         ('share/' + package_name + '/config', [
             'config/catch_controller.yaml',
             'config/catch_controller_d435_only.yaml',
+            'config/d435_throw_analysis.yaml',
+            'config/d435_throw_ground_truth.csv',
             'config/goal_to_cmd_vel.yaml',
             'config/nx_time_sync.yaml',
         ]),
@@ -28,5 +30,6 @@ setup(
         'prepare_nx_epoch = volleyball_catch_controller.nx_epoch:main',
         'check_chassis_odom = volleyball_catch_controller.chassis_odom_check_node:main',
         'transport_recovery_test = volleyball_catch_controller.transport_recovery_test_node:main',
+        'analyze_d435_throw_bag = volleyball_catch_controller.analyze_d435_throw_bag:main',
     ]},
 )

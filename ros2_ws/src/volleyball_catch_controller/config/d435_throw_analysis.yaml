@@ -1,0 +1,28 @@
+topics:
+  observation: /d435/ball/observation
+  landing: /ball/landing
+  state: /catch/state
+  goal: /auto/goal_pose
+
+timing:
+  max_rgb_depth_delta_ns: 2000000
+  max_timestamp_uncertainty_ns: 2000000
+
+analysis:
+  state_goal_match_max_age_s: 0.20
+
+thresholds:
+  min_detection_rate: 0.95
+  min_rgbd_rate: 0.90
+  min_timing_valid_rate: 0.99
+  max_frame_gap_p99_s: 0.050
+  min_first_prediction_lead_s: 0.80
+  max_impact_time_error_p90_s: 0.050
+  # Set this to plate effective radius minus ball radius and safety margin,
+  # or pass --target-radius. No landing PASS is issued while it is null.
+  effective_target_radius_m: null
+  max_linear_speed_mps: 0.40
+  max_linear_accel_mps2: 0.80
+  braking_margin_s: 0.15
+  tti_bins_s: [1.0, 0.8, 0.6, 0.4, 0.25]
+  tti_bin_half_width_s: 0.08

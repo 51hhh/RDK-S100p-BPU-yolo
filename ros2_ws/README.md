@@ -1,5 +1,8 @@
 # RDK ROS2 工作区
 
+D435i 单相机近距离抛球的 rosbag 录制、真实落点标注和离线验收流程见
+[D435i 近距离抛球录制与接球能力分析](../docs/D435_THROW_VALIDATION.md)。
+
 ## 构建
 
 ```bash

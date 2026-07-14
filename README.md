@@ -120,6 +120,7 @@ RDK-S100p-BPU-yolo/
 RDK S100P + D435i + YOLO26 的完整 RGB-D 启动、配置、可视化和深度图说明见：
 
 - [RGB-D 使用说明](docs/RGBD_USAGE.md)
+- [D435i 近距离抛球录制与接球能力分析](docs/D435_THROW_VALIDATION.md)
 - [远近场接球系统 Wiki](wiki/Home.md)
 
 RDK ROS2 接口包和独立控制节点位于 `ros2_ws/src/`。D435i视觉进程发布

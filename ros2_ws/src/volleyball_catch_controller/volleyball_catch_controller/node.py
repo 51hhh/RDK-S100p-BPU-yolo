@@ -8,7 +8,13 @@ from geometry_msgs.msg import PointStamped, PoseStamped, Vector3Stamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.duration import Duration
-from rclpy.event_handler import SubscriptionEventCallbacks
+try:
+    from rclpy.event_handler import SubscriptionEventCallbacks
+except ImportError:
+    # Early ROS 2 Humble releases expose this class from qos_event.  The RDK
+    # image uses that API layout, while newer Humble installations provide the
+    # event_handler compatibility module.
+    from rclpy.qos_event import SubscriptionEventCallbacks
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -101,7 +107,7 @@ class CatchController(Node):
             'impact_grace_s': 0.15,
             'max_cycle_extension_s': 1.0,
             'nx_max_message_age_s': 0.05,
-            'd435_max_message_age_s': 0.05,
+            'd435_max_message_age_s': 0.08,
             'max_future_skew_s': 0.02,
             'require_nx_time_sync': True,
             'time_sync_timeout_s': 0.50,
@@ -179,7 +185,12 @@ class CatchController(Node):
             )
         self.d435_only = self.sensor_mode == 'd435_only'
 
-        self.nx_t, self.nx_r, self.nx_extrinsics_ok = self._load_extrinsics('nx')
+        if self.d435_only:
+            self.nx_t = np.zeros(3, dtype=float)
+            self.nx_r = np.eye(3, dtype=float)
+            self.nx_extrinsics_ok = False
+        else:
+            self.nx_t, self.nx_r, self.nx_extrinsics_ok = self._load_extrinsics('nx')
         self.d435_t, self.d435_r, self.d435_extrinsics_ok = self._load_extrinsics('d435')
         self.catcher_point_base = np.asarray(
             self.p['catcher_point_base'], dtype=float
@@ -1260,7 +1271,10 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

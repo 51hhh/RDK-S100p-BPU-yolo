@@ -28,7 +28,8 @@ catch_controller:
     impact_grace_s: 0.15
     max_cycle_extension_s: 1.0
     nx_max_message_age_s: 0.05
-    d435_max_message_age_s: 0.05
+    # RDK measurement at 848x480 RGB-D + BPU inference: 44-61 ms capture age.
+    d435_max_message_age_s: 0.08
     max_future_skew_s: 0.02
     # 独立轨迹仍需将NX采集时间修正到RDK/odom时间域。
     require_nx_time_sync: true
